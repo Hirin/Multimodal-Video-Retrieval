@@ -1,0 +1,1088 @@
+{
+  "video_id": "K01_V001",
+  "frame_id": "0021",
+  "detector": "yolo11x-seg.pt",
+  "boxes": [
+    {
+      "xyxy": [
+        1541.596435546875,
+        424.1268310546875,
+        1702.3330078125,
+        735.2047119140625
+      ],
+      "score": 0.8851948380470276,
+      "class_id": 56,
+      "class_name": "chair",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "Vljb1g1Y1hNol0Z1oROhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNPm0X1PSOhNnl0\\1PSOdNPm0\\1PSOdNPm0\\1PSOdNPm0\\1PSOdNPm0\\1PSOdNPm0\\1PSOdNPm0\\1PSOdNPm0\\1PSOdNPm0\\1oROeNQm0[1nROfNRm0Z1mROgNSm0Z1kROhNTm0Y1jROiNUm0X1iROjNVm0V1jROjNVm0V1hROnNVm0R1jROnNVm0S1hROoNWm0R1dROVOMZOYl0a1hSOWOMZOZl0`1gSOXOMZO[l0\\4O1O00000000000000000O0O11O00eNbK]UO^4dj0cKZUO]4fj0eKXUO[4Zj0e13001FaMSVORMbj0m2`UOQM`j0P3`UOoL]j0S3gUOgL\\j0Z3eUOdL[j0]3eUOcLQj0g3oUOWLSj0i3mUOVLSj0k3mUOULii0U4YVOiKfi0X4ZVOhKfi0W4[VOiK^i0\\4dVObK]i0_4cVOaK\\i0`4dVO`KXi0d4hVO\\KWi0e4iVO[KWi0e4iVO[Kmh0o4SWOQKlh0P5TWOPKlh0P5UWOoJkh0Q5VWOPKhh0P5YWOoJgh0Q5YWOoJgh0Q5YWOoJgh0Q5YWOoJgh0Q5YWOoJgh0Q5YWOoJgh0Q5YWOoJgh0Q5YWOoJgh0Q5YWOoJgh0Q5YWOoJgh0Q5ZWOoJeh0Q5\\WOPKbh0P5_WOoJah0Q5_WOoJah0Q5_WOoJah0Q5_WOoJah0Q5_WOoJah0Q5_WOoJah0Q5_WOoJah0Q5`WOoJ_h0Q5bWOoJ]h0Q5dWOoJ[h0Q5eWOoJ[h0Q5eWOoJ[h0Q5eWOoJ[h0Q5eWOoJ[h0Q5gWOmJYh0S5hWOlJXh0T5hWOmJWh0U5iWOjJVh0W5iWOjJVh0V5jWOjJVh0V5jWOjJVh0V5jWOjJVh0V5kWOjJTh0V5mWOmJog0S5RXOlJng0T5RXOmJmg0S5SXOoJkg0Q5UXOoJkg0Q5VXOnJjg0R5WXOmJig0S5XXOlJhg0T5XXOmJgg0S5YXOnJfg0R5ZXOoJeg0Q5\\XOoJcg0S5\\XOVKZg0j4gXOUKYg0k4hXOTKXg0l4lXOPKTg0P5lXOPKTg0P5mXOoJSg0Q5oXOmJQg0S5oXOmJQg0S5PYOlJPg0T5QYOdJVg0\\5kXObJVg0^5kXO`JVg0`5a20000000000000000QMoTOWOQk0i0PUOVOPk0i0RUOVOnj0`0kUOQOUj0n0mUOQOSj0o0nUOPORj0f0gVOiN[i0V1gVOiNYi0W1hVOgNYi0R1RWOhNPi0W1QWOiNoh0W1QWOiNoh0W1QWOiNoh0W1QWOiNoh0W1QWOiNoh0W1QWOiNoh0W1QWOiNoh0W1QWOiNoh0W1QWOiNoh0W1QWOiNPi0U1RWOiNmjm6"
+      },
+      "area": 27497,
+      "dominant_color_hsv": [
+        142,
+        26,
+        37
+      ],
+      "color_name_en": "black",
+      "color_name_vi": "đen",
+      "color_confidence": 0.48707131687093136,
+      "palette_top3": [
+        [
+          142,
+          26,
+          37,
+          0.48707131687093136
+        ],
+        [
+          11,
+          50,
+          68,
+          0.4513946976033749
+        ],
+        [
+          37,
+          172,
+          54,
+          0.06153398552569371
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        1420.037841796875,
+        244.74002075195312,
+        1555.8922119140625,
+        803.0906982421875
+      ],
+      "score": 0.8801256418228149,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "lSl^1R2c4l3a`0UL__Ol3``0TL`_Ol3``0TL`_Ol3``0TL`_Ol3``0TL`_Ol3``0TL`_Ol3``0TL`_Ol3``0TL`_Ol3``0TL`_Ol3``0TL`_Ol3``0TL__Om3a`0SLU_OW4k`0iKT_OX4l`0iKS_OX4l`0iKf^Oe4Ya0\\Ke^Of4Za0[Ke^Oe4[a0_Kn]OT5Rb0mJm]OS5Rb0nJm]OS5Rb0PK_]O_5^b0cJa]O]5_b0cJ`]O^5`b0dJf\\OT6Zc0lIe\\OU6\\c0kIb\\OW6^c0lIl[Oh6Sd0XIl[Oh6Td0YIj[Oh6Vd0]30000000001RN[Cg^Of<Wa0\\Ch^Oe<Va0]Ch^Od<n`0XD_^Oi;aa0XD]^Oi;ba0YD]^Og;_a0dDZ^O\\;ea0eD[^O[;da0gDZ^O[;aa0PEW^OR;ga0PEW^OR;ha0nDW^OT;[a0T3F2O000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000O1G9O1O1O1O1O1O1O100N2O100N200O1@`001Na0`NP1O2N8RNh1O0O8B8N2OP1bL_2O1NT1hIoWO6^h0JcWO4_h0JbWO6Pi0fN[5N1000000000000000001N\\od;"
+      },
+      "area": 57733,
+      "dominant_color_hsv": [
+        118,
+        201,
+        103
+      ],
+      "color_name_en": "blue",
+      "color_name_vi": "xanh dương",
+      "color_confidence": 0.7663901061784422,
+      "palette_top3": [
+        [
+          118,
+          201,
+          103,
+          0.7663901061784422
+        ],
+        [
+          15,
+          72,
+          157,
+          0.1285226820016282
+        ],
+        [
+          132,
+          71,
+          72,
+          0.10508721181992968
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        226.16514587402344,
+        541.610107421875,
+        424.0586242675781,
+        798.2224731445312
+      ],
+      "score": 0.8454747796058655,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "ViZ7k2ln02O00000000000000000O1O6J1O2N;E2O0K7N0O2_MhL_VO[3^i0gL`VOZ3_i0gL`VOZ3\\i0QM\\VOP3di0QMZVOP3ei0RMYVOo2Wi0eMdVOZ2^i0gM`VOY2ai0gM_VOY2ai0lMXVOV2hi0jMWVOW2ii0jMVVOV2ji0nMnUOT2Tj0mMjUOT2Vj0mMhUOS2Yj0QN_UOR2bj0oM\\UOQ2ej0oMZUOQ2gj0_21O1000000O1O1O1000000O1O1O100N200000000O1N200000000000000000000000000000000000000000000O1O1O100000000000000000000`LlTO<Tk0CnTO<Rk0DoTO;[k0WOjTOh0Wk0VOkTOi0Vk0VOjTOj0Wk0UOkTOi0Vk0VOkTOi0Uk0VOlTOj0Yk0POjTOn0Vk0QOkTOo0Vk0POjTOP1Zk0lNfTOT1[k0kNeTOU1\\k0iNfTOU1bk0cN`TO[1ak0dNaTOZ1ak0dNaTO[1fk0ZN_TOe1bk0ZN_TOe1bk0YN`TOf1gk0QN\\TOn1dk0RN]TOm1dk0QN]TOo1gk0iM]TOW2dk0gM]TOY2dk0eM]TO[2bm0N1O002N001O1O1O0000001O1O1O0000001O1O1O0000001O1O1O0O3M1O1000001O2N000000000000001O1M3N1000001O1O1O1O1O1O002N1O004J3O1O1O1O1O1O1O002N1O0O3M1O2N5K2N2N`Z]a1"
+      },
+      "area": 25609,
+      "dominant_color_hsv": [
+        43,
+        63,
+        205
+      ],
+      "color_name_en": "green",
+      "color_name_vi": "xanh lá",
+      "color_confidence": 0.45733921668163535,
+      "palette_top3": [
+        [
+          43,
+          63,
+          205,
+          0.45733921668163535
+        ],
+        [
+          134,
+          163,
+          184,
+          0.2949744230543949
+        ],
+        [
+          104,
+          51,
+          69,
+          0.2476863602639697
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        727.1441040039062,
+        540.4884033203125,
+        907.502197265625,
+        746.05224609375
+      ],
+      "score": 0.826544463634491,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "d[ng0d1SP11000000000000000000O1L4O100F811O0J61O01L4O1O1L4O10OlM\\NoSOj1Ql0XNmSOh1Sl0ZNkSOg1Ql0R200O0M30001F:000000000000000000000O1O1O11O1O1O000000000000000000000000000000O1O1O100000000000000[OdSOiKal0V4aSOiK_l0V4bSOiK_l0S4e0O10000000000000:F1O1O7aMiROOWm00jRO0Wm0NkRO1Ym0JoROMTm01nROMTm02lRONUm0LPSO4Qm0KoRO5Qm0JQSO5Tm0EnRO:Rm0EPSO:Qm0DPSO<Vo0000000N200000000000000O1O1O102N1O0000000000000O1O1O100000000000O1N2000000000O1O1O100000000000000000000000000000002N1O0000000O3M1O1000001O1H8N2NVo_Q1"
+      },
+      "area": 14838,
+      "dominant_color_hsv": [
+        30,
+        109,
+        135
+      ],
+      "color_name_en": "yellow",
+      "color_name_vi": "vàng",
+      "color_confidence": 0.3916295996765063,
+      "palette_top3": [
+        [
+          30,
+          109,
+          135,
+          0.3916295996765063
+        ],
+        [
+          128,
+          77,
+          206,
+          0.38549669766814937
+        ],
+        [
+          140,
+          49,
+          52,
+          0.2228737026553444
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        489.5792236328125,
+        487.6575622558594,
+        662.837646484375,
+        639.3956298828125
+      ],
+      "score": 0.809429943561554,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "mTQ`0S1dP11000000000000000000000000O1L4O1O2K5O1N1L4O1O2K5N2O0aNaN`ROd1`m0]N_ROc1`m0_N^ROb1[m0a1O1O1L4O100C=O100000000000000000000000000000000000001O1O1O000000000000000000000000000000000000000001O:F1O005K001O4L1O1O9YMkQOY1Vn0eNlQOZ1Un0dNlQO\\1^n0SNkQOk1Un0UNlQOj1Un0TNlQOl1To0L1O1O1O1O1O1O1O002N1O0O3M1O2O1O1O0000001O1O1O0000001O1O1O0000001O1O1O000000002N000000001O2N000000001O1O1O0000001O1O1O1O1O1O002N1O000000002N001N2N2N2O4L1O0OfY`Y1"
+      },
+      "area": 13257,
+      "dominant_color_hsv": [
+        133,
+        95,
+        138
+      ],
+      "color_name_en": "purple",
+      "color_name_vi": "tím",
+      "color_confidence": 0.4940031681375877,
+      "palette_top3": [
+        [
+          133,
+          95,
+          138,
+          0.4940031681375877
+        ],
+        [
+          7,
+          76,
+          177,
+          0.31809610017349327
+        ],
+        [
+          10,
+          76,
+          71,
+          0.18790073168891905
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        0.235198974609375,
+        618.3431396484375,
+        151.74044799804688,
+        811.4965209960938
+      ],
+      "score": 0.8002679347991943,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "fm6n5ik010000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001O<D1O1O4L1O1Oj0VO1O1O7I001Ob0_LSROS2nm0lMSROS2nm0kMTROT2in0O1O0000001O1O1O0000001O1O1O000000002N001O2N000000001O1O1O0000001O1O1O1O1O1O000000002N1O000000002N000000001O1O1O0000001O1O1O1O1O1O005K001OPW]j1"
+      },
+      "area": 17711,
+      "dominant_color_hsv": [
+        126,
+        93,
+        219
+      ],
+      "color_name_en": "blue",
+      "color_name_vi": "xanh dương",
+      "color_confidence": 0.4159561854214895,
+      "palette_top3": [
+        [
+          126,
+          93,
+          219,
+          0.4159561854214895
+        ],
+        [
+          7,
+          85,
+          205,
+          0.38552312122409804
+        ],
+        [
+          106,
+          42,
+          61,
+          0.19852069335441253
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        532.7071533203125,
+        708.1370849609375,
+        722.077392578125,
+        830.6376342773438
+      ],
+      "score": 0.7990307211875916,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "_oca0=[Q11O00000000000000000O1O1O1O1O1O1O1O1O100000000N200O1N200O1O1O1O1O1O1O1O1O100000000jNlNfQOV1Yn0lNeQOU1Zn0lNfQOT1Pn0FYQOa0gn0@WQOa0hn0@WQOa0hn0X1O1O1O1O1O1O1O1O1O1O100F:O10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000O1O1O1000001O:F001O1O1O1O4L1O1O7I001O=C001O7I1O005K001O:F1O002N000000001O2N000000000000000O1O1O2N2N2N100N201N2M3O1N5K2N1Om`ZW1"
+      },
+      "area": 13583,
+      "dominant_color_hsv": [
+        133,
+        32,
+        66
+      ],
+      "color_name_en": "purple",
+      "color_name_vi": "tím",
+      "color_confidence": 0.48052712950011045,
+      "palette_top3": [
+        [
+          133,
+          32,
+          66,
+          0.48052712950011045
+        ],
+        [
+          47,
+          100,
+          213,
+          0.2893322535522344
+        ],
+        [
+          9,
+          85,
+          96,
+          0.23014061694765517
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        646.3662109375,
+        655.0986328125,
+        709.152587890625,
+        762.3004760742188
+      ],
+      "score": 0.7961708307266235,
+      "class_id": 56,
+      "class_name": "chair",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "[hUe0S1eP11O0000000000000000001O1O1N1N200O2N2N2N1O1O1O1G;M2O000000000000002N001O1O1O1O4L1O1O4L001O4L1O1O1O1O1O1O1O002N001O2N0000dNoQOoNSn0P1oQOnNRn0R1oQOmNQn0n0_101Nf0QO:O2Oj^jW1"
+      },
+      "area": 4231,
+      "dominant_color_hsv": [
+        12,
+        152,
+        127
+      ],
+      "color_name_en": "brown",
+      "color_name_vi": "nâu",
+      "color_confidence": 0.6485464429212952,
+      "palette_top3": [
+        [
+          12,
+          152,
+          127,
+          0.6485464429212952
+        ],
+        [
+          10,
+          73,
+          105,
+          0.24485937130701962
+        ],
+        [
+          141,
+          26,
+          107,
+          0.10659418577168518
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        374.26849365234375,
+        532.166748046875,
+        520.496337890625,
+        711.806396484375
+      ],
+      "score": 0.7779133915901184,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "dW_<b3Un02O0000000000000000000K500O1F<N0O1I7O1O2K6M100C=O100000001O1O1O0000001O:F0000000000000000000000000000000000000000000000jNSTOWLWl0h3jSOWLWl0h3kSOVLVl0f3PTOWLQl0h3PTOWLQl0i3PTOVLPl0h3STOULok0k3RTOSLok0m3RTORLnk0n3n00000000000000000000000cN_ROcNam0]1_ROcNbm0[1`ROdNmm0h0[ROWOem0h0]ROWOdm0h0]ROWOgm0e0ZROZOgm0e0ZROZOgm0d0ZRO\\Omm09WROGjm07WROIim07WROIPn0FZRO:gm0DZRO<gm0CYRO=ao00000O1N20000000000000O00000100000O000001O1O1O100N2O100N200000001N2N2N1000001N2K5N2O1M3N2OnoT^1"
+      },
+      "area": 14971,
+      "dominant_color_hsv": [
+        118,
+        100,
+        178
+      ],
+      "color_name_en": "blue",
+      "color_name_vi": "xanh dương",
+      "color_confidence": 0.4205463896867277,
+      "palette_top3": [
+        [
+          118,
+          100,
+          178,
+          0.4205463896867277
+        ],
+        [
+          9,
+          68,
+          134,
+          0.3198183154097923
+        ],
+        [
+          146,
+          46,
+          60,
+          0.2596352949034801
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        153.52496337890625,
+        685.1826171875,
+        235.03111267089844,
+        805.337646484375
+      ],
+      "score": 0.6588189005851746,
+      "class_id": 56,
+      "class_name": "chair",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "Zln4i2on00000000000000000000000000O1N200000000O1C=00000N200000000O1O1O1O1[Oe0O10000000000001O7I1O1O7I001O1O1O1O1O1O1O1O1O000000000000000000000000002N0000N2000000000000000S1mN1O1O?A1O0000000000000000001NbjTg1"
+      },
+      "area": 8609,
+      "dominant_color_hsv": [
+        16,
+        154,
+        176
+      ],
+      "color_name_en": "orange",
+      "color_name_vi": "cam",
+      "color_confidence": 0.49634103844813565,
+      "palette_top3": [
+        [
+          16,
+          154,
+          176,
+          0.49634103844813565
+        ],
+        [
+          101,
+          89,
+          68,
+          0.254965733534673
+        ],
+        [
+          65,
+          43,
+          161,
+          0.24869322801719132
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        816.10693359375,
+        514.6988525390625,
+        925.0869140625,
+        644.8765869140625
+      ],
+      "score": 0.6223261952400208,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "a^Sk0j3mm02O000000000000000000000000000000000000000000000000000000000000000000000000000000000000O1O1O100000000000108H000O1TNkQO3Vn0LkQO3Vn0KlQO4Xn0DSRO5nm0ITRO6lm0IURO6Vn0VOTROi0nm0VORROi0Pn0UOQROj0_o0O1O1000000O1O1O1000000O1O1O100N200000000O3L200000001O2N000O1O1O2N5B;O1NVliP1"
+      },
+      "area": 8773,
+      "dominant_color_hsv": [
+        123,
+        108,
+        113
+      ],
+      "color_name_en": "blue",
+      "color_name_vi": "xanh dương",
+      "color_confidence": 0.3917702040351077,
+      "palette_top3": [
+        [
+          123,
+          108,
+          113,
+          0.3917702040351077
+        ],
+        [
+          9,
+          94,
+          150,
+          0.384817052319617
+        ],
+        [
+          9,
+          96,
+          58,
+          0.22341274364527527
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        715.5357666015625,
+        592.714111328125,
+        757.2105712890625,
+        742.8597412109375
+      ],
+      "score": 0.5996577739715576,
+      "class_id": 56,
+      "class_name": "chair",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "ocag0e3Sn01O000000000000000000O1O1O1O1L4O100I7O1O1I7O100F:O1O1D<O1O1I700O1O1O1O1L4O100K500Oa0YO8N1OilWV1"
+      },
+      "area": 3798,
+      "dominant_color_hsv": [
+        10,
+        102,
+        106
+      ],
+      "color_name_en": "brown",
+      "color_name_vi": "nâu",
+      "color_confidence": 0.6727224855186941,
+      "palette_top3": [
+        [
+          10,
+          102,
+          106,
+          0.6727224855186941
+        ],
+        [
+          143,
+          28,
+          96,
+          0.2859399684044234
+        ],
+        [
+          101,
+          236,
+          7,
+          0.04133754607688257
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        145.4556121826172,
+        487.94073486328125,
+        248.44683837890625,
+        625.5576171875
+      ],
+      "score": 0.5466119647026062,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "Shn4g1QP11O00000000000000000O1N200O1O1O1O1L4O100^Nb100O0G9001000000000000000000000000000000000000000000000000O1O1O1000000000000000000000000000001O=C001N3M1O2O1O1O1O4L1O007I1O1O4J3N105K001O4iNnPO^OUo0`0mPO_OTo0?mPO@Xo05Z1N105I200000000000000000001NY[hf1"
+      },
+      "area": 9488,
+      "dominant_color_hsv": [
+        7,
+        100,
+        120
+      ],
+      "color_name_en": "brown",
+      "color_name_vi": "nâu",
+      "color_confidence": 0.6049747048903878,
+      "palette_top3": [
+        [
+          7,
+          100,
+          120,
+          0.6049747048903878
+        ],
+        [
+          138,
+          148,
+          116,
+          0.23313659359190556
+        ],
+        [
+          128,
+          58,
+          138,
+          0.16188870151770657
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        0.36504364013671875,
+        511.5282897949219,
+        109.68184661865234,
+        647.0337524414062
+      ],
+      "score": 0.5239346623420715,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "aj6Y3^n02O000000000000000000000000000000000000000000000000000000000000000000000000002N1O000000000000000000002N000000001O4L1008H000O1O1O1038E0O02N001O4L1O1O<D1O1Ob0^O1O002N1O004L1O1O1O1O1O1O1O1O1O1O0O6_O<O2N>B1O2Nn_fk1"
+      },
+      "area": 9776,
+      "dominant_color_hsv": [
+        7,
+        93,
+        137
+      ],
+      "color_name_en": "brown",
+      "color_name_vi": "nâu",
+      "color_confidence": 0.6666325695581015,
+      "palette_top3": [
+        [
+          7,
+          93,
+          137,
+          0.6666325695581015
+        ],
+        [
+          137,
+          39,
+          70,
+          0.2323036006546645
+        ],
+        [
+          163,
+          154,
+          128,
+          0.10106382978723404
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        896.259033203125,
+        460.0697021484375,
+        998.7327880859375,
+        589.6455688476562
+      ],
+      "score": 0.5110019445419312,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "d[_m0W3an01O00000000000000000O1O1O1O1D<O101O1O1O00:F1O000000O1D<O1O1^Ob0O1O1[Oe000O1L4O1O1O1O1O1O1O10000000000001O1O1O1O1O1O1Ob0^O1O007I1O1O7I1O002N01O<D1O1O4dM_QOW1dn0gN^QOX1bn0hN^QOW1do0G7O2N5K2N100N2O2O1O1O000000002N1O000000002L201O1O1O1N2K5N2N5H5N10^eWn0"
+      },
+      "area": 8196,
+      "dominant_color_hsv": [
+        8,
+        97,
+        113
+      ],
+      "color_name_en": "brown",
+      "color_name_vi": "nâu",
+      "color_confidence": 0.5014641288433382,
+      "palette_top3": [
+        [
+          8,
+          97,
+          113,
+          0.5014641288433382
+        ],
+        [
+          21,
+          60,
+          64,
+          0.3424841386041972
+        ],
+        [
+          149,
+          106,
+          78,
+          0.15605173255246463
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        346.03759765625,
+        459.9476318359375,
+        461.76422119140625,
+        585.0105590820312
+      ],
+      "score": 0.47895699739456177,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "_UY;_3Xn02O00000000000000000O1G9O10000000000000000000000000000000000000000000000000000000000000000000000000O1[Oe0O1O1G9O1O1L4O100N2O1000001Oe0YO201Na0_O1O2O4L1O1N2N2N100000002N1O0O1O1O102N000000001O1O1O1000000O1O1O000000011O00O000000O1O1O1O3M1O2NR\\T`1"
+      },
+      "area": 8499,
+      "dominant_color_hsv": [
+        10,
+        84,
+        108
+      ],
+      "color_name_en": "brown",
+      "color_name_vi": "nâu",
+      "color_confidence": 0.5631250735380633,
+      "palette_top3": [
+        [
+          10,
+          84,
+          108,
+          0.5631250735380633
+        ],
+        [
+          133,
+          58,
+          86,
+          0.2434404047535004
+        ],
+        [
+          142,
+          134,
+          105,
+          0.19343452170843628
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        220.71868896484375,
+        708.4019775390625,
+        561.3743896484375,
+        817.2918701171875
+      ],
+      "score": 0.4763246178627014,
+      "class_id": 60,
+      "class_name": "dining table",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "Wgj79^Q12N1O1O1000000O1O1O100N2O101M3O1N1O1O1O1O1O1000000O1O1O1000000O1O1O100N200O1N200000000O1O1O10O1O1O100000O00000100N2O100N200O1L4O1O1L4O100N200O1L4O1O1O1O1O1O1O2OeSl1J`lSN2O0000000000000000001M3O1O00000O1N4N1O000000002N0O1O1O101O1O1N1O1O101O1O1N2RO[OfPOg0Xo0[OfPOg0Yo0ZOfPOf0Zo0l00001O4L001O4L1O1O1O1O1O7I001O1O1O1O1O1O0000000000000000000000001O1O1O000000000000000000000000O1O1O1000000000000000000000000000000O1O1O1000000O1O1O100N2O100N200O1O1O1O1O1O1000000O1O1O100N2O100N200O1O1O1O1O1O1O1O1O1O1O1O100I7O1O1I7O100N200O1O1O1000000000000O1O1O1O1L4O100N200O1O1O1000000000000000000000001NaT_\\1"
+      },
+      "area": 13603,
+      "dominant_color_hsv": [
+        11,
+        151,
+        164
+      ],
+      "color_name_en": "orange",
+      "color_name_vi": "cam",
+      "color_confidence": 0.6879364845989855,
+      "palette_top3": [
+        [
+          11,
+          151,
+          164,
+          0.6879364845989855
+        ],
+        [
+          9,
+          63,
+          172,
+          0.22958170991693008
+        ],
+        [
+          136,
+          48,
+          178,
+          0.08248180548408439
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        562.7478637695312,
+        459.1542663574219,
+        708.6380004882812,
+        592.7672119140625
+      ],
+      "score": 0.47568145394325256,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "To\\b0X1_P12O0000000000000000001O1O1O1O4L001O=]POZNZn0g1dQO[N[n0e1eQO[N[n0f2K001O1O1O1O1O1O1O1O1O002N1O002N001O1O1O0000001O1O1O0000001O1O1O00mMURO9km0FWRO9im0GXRO9gm0]OoRO8Pm0GRSO9ml0FUSO9kl0[OeSOa0[l0^OgSOa0Yl0^OhSOb0Xl0oNYTOo0gk0POZTOP1gk0nN[TOQ1Zn0L1O1O1O1O0000000000000O1O1O1000000000000000001N2N2N1000000000000000000000000000000000000000000000000000000000000000000000000000000O1O1O100000000000002N1O0O1O1O10elPX1"
+      },
+      "area": 7822,
+      "dominant_color_hsv": [
+        7,
+        81,
+        149
+      ],
+      "color_name_en": "red",
+      "color_name_vi": "đỏ",
+      "color_confidence": 0.5478138583482486,
+      "palette_top3": [
+        [
+          7,
+          81,
+          149,
+          0.5478138583482486
+        ],
+        [
+          153,
+          107,
+          135,
+          0.26630017898235747
+        ],
+        [
+          8,
+          84,
+          61,
+          0.18588596266939403
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        1691.88427734375,
+        34.102020263671875,
+        1919.19140625,
+        621.9636840820312
+      ],
+      "score": 0.4741484522819519,
+      "class_id": 62,
+      "class_name": "tv",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "l[bg1Z8g1lHjd0U7T[OmHkd0S7U[OmHkd0S7U[OmHkd0S7U[OmHkd0S7U[OmHkd0S7U[OmHkd0S7U[OmHkd0S7U[OmHkd0S7U[OmHkd0S7U[OmHkd0S7T[OnHld0T7nZORIPe0o6oZOQIQe0o6nZORIRe0j900O1N20001O1O1N1O1O100000000000001O1O1O00000O1O1O101O1O1O00000O1O1O101M3O1N1L4O1O1O1O1O1O3M100N2O101K6M1O1O1O1O2N2N2N1L400O1L4O1O2N2N2N1O1O100N200O2M3O1N1O1O10002N0O1O1O101O2N0O1O1O100000001O1O1O0N2O100000001M3O1O00000O2N2N2O00000000000O1O3M2O000000002N0O1O1O1000000O2N2N2O0N20001O1O1N1N20001O1O1O00000O1O1O101O1O1N1O1O1O1G9O10002N001O2N001O1O1O0000001O1O1O1O1O1O002N001O2N001O=C000000000000000000000000000000000000000000000000000000000RN"
+      },
+      "area": 107790,
+      "dominant_color_hsv": [
+        77,
+        42,
+        77
+      ],
+      "color_name_en": "green",
+      "color_name_vi": "xanh lá",
+      "color_confidence": 0.398738287410706,
+      "palette_top3": [
+        [
+          77,
+          42,
+          77,
+          0.398738287410706
+        ],
+        [
+          20,
+          22,
+          179,
+          0.36141571574357545
+        ],
+        [
+          25,
+          25,
+          109,
+          0.23984599684571853
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        67.16880798339844,
+        610.2356567382812,
+        266.1720275878906,
+        712.9573364257812
+      ],
+      "score": 0.35720834136009216,
+      "class_id": 60,
+      "class_name": "dining table",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "bWV2a1VP12O0000000000000000001O1O1O0N4M101O2N000N200000000000000O2N2N2O00000000000O1O1O101O:F0O1O1O1O1O1O100000000N200000000000000O1N200000000000000000000000000000000000000000F:O1O1O1O100N2O100000000N20000000O1O1O10O1O1O1000000O1O1O1O1O1O01O1O1000000O1G710100000000000000000000N200000000O1O1O1000000O1O1O1000000000000O1O1O1000000O1O1O100N200O1I7O1O1G9O1O1O1O1000000O1O1O100N2O100N200O1O1O2N:F2N2N5K2N1Ofnaf1"
+      },
+      "area": 13845,
+      "dominant_color_hsv": [
+        14,
+        112,
+        131
+      ],
+      "color_name_en": "brown",
+      "color_name_vi": "nâu",
+      "color_confidence": 0.5658360418923799,
+      "palette_top3": [
+        [
+          14,
+          112,
+          131,
+          0.5658360418923799
+        ],
+        [
+          23,
+          35,
+          132,
+          0.2258577103647526
+        ],
+        [
+          112,
+          15,
+          181,
+          0.20830624774286746
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        1226.5814208984375,
+        370.6663513183594,
+        1317.9638671875,
+        491.2184143066406
+      ],
+      "score": 0.35163387656211853,
+      "class_id": 58,
+      "class_name": "potted plant",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "hdaX1j07a1Tn0aNkQO`1Tn0`NlQO`1Tn0`NlQO`1Tn0`NlQO`1Tn0`NlQO`1Tn0`NlQO`1Tn0`NlQO`1Tn0`NlQO`1Tn0`NlQO`1Tn0`NlQO`1Tn0aNjQO`1Vn0;PROdMPn0[2QROeMnm0[2TROcMam0h2g00100000000000000N2O100000000000000000000N200000000000000O1O1O1000000O1O1O100000000mMQQO]1on0cNQQO]1Po0aNRQO]1io0K2N2O4]NUPOQ1lo0mNVPOR1jo0nNVPOR1ZP1N1O002N001O1O1O0000001O1M3N2O1O1O00000000000000000000000000iQbc0"
+      },
+      "area": 6715,
+      "dominant_color_hsv": [
+        34,
+        124,
+        60
+      ],
+      "color_name_en": "yellow",
+      "color_name_vi": "vàng",
+      "color_confidence": 0.4914370811615786,
+      "palette_top3": [
+        [
+          34,
+          124,
+          60,
+          0.4914370811615786
+        ],
+        [
+          41,
+          67,
+          78,
+          0.3343261355174981
+        ],
+        [
+          26,
+          41,
+          149,
+          0.1742367833209233
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        687.6271362304688,
+        717.52587890625,
+        950.7753295898438,
+        827.5279541015625
+      ],
+      "score": 0.3178074061870575,
+      "class_id": 60,
+      "class_name": "dining table",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "U_hf0`0XQ10000000000000000000000000O2M4N0O1O1O1O1O1O1O1O1O100N2VPOYOcn0g0\\QO[Obn0g0]QOYOan0j0YQO[Ogn0f0XQOZOhn0g0VQOZOjn0P1hPOTOXo0l0gPOUOXo0m0fPOTOYo0f1O1O1O1O1000000O1O1O100N2O100N200O1O1O1000000O1O1O1000000O1O1O1O1D<O10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000O1@`000O1L4O1O1O1O100K500O1L4O1O1L4O100N200O1L4O1O1O1O1O1L400O1N200O1O1O1O1L4O100K500O1O1O1O1O1O1000000000000000000000000000000000001Na_]o0"
+      },
+      "area": 23479,
+      "dominant_color_hsv": [
+        12,
+        104,
+        211
+      ],
+      "color_name_en": "orange",
+      "color_name_vi": "cam",
+      "color_confidence": 0.7143404744665446,
+      "palette_top3": [
+        [
+          12,
+          104,
+          211,
+          0.7143404744665446
+        ],
+        [
+          11,
+          120,
+          163,
+          0.22816133566165508
+        ],
+        [
+          131,
+          36,
+          211,
+          0.05749818987180033
+        ]
+      ]
+    },
+    {
+      "xyxy": [
+        119.18758392333984,
+        455.1343688964844,
+        182.05575561523438,
+        561.2799682617188
+      ],
+      "score": 0.2588641047477722,
+      "class_id": 0,
+      "class_name": "person",
+      "mask_rle": {
+        "size": [
+          1080,
+          1920
+        ],
+        "counts": "^gh3i1no02O00000000000000000O1O1O100N2O100UOk0O100K500O1C=000000000O1G9O1O1O1O1000000000000000000000000000000O1O1O100000000gNcQOUO_n0j0cQOTO^n0k0dQOTO\\n0h0oQOoNSn0P1oQOoNQn0Q1oQOnNRn0n0^1O1Oa0\\O5N1OPaWi1"
+      },
+      "area": 5571,
+      "dominant_color_hsv": [
+        8,
+        71,
+        111
+      ],
+      "color_name_en": "brown",
+      "color_name_vi": "nâu",
+      "color_confidence": 0.5246813857476216,
+      "palette_top3": [
+        [
+          8,
+          71,
+          111,
+          0.5246813857476216
+        ],
+        [
+          143,
+          63,
+          98,
+          0.2683539759468677
+        ],
+        [
+          7,
+          128,
+          61,
+          0.20696463830551068
+        ]
+      ]
+    }
+  ]
+}

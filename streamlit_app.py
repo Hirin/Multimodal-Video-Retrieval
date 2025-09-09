@@ -1,0 +1,1251 @@
+import os
+import io
+import re
+import json
+import glob
+import time
+import sqlite3
+import concurrent.futures
+from pathlib import Path
+from collections import deque
+from typing import List, Dict, Tuple, Optional
+
+import numpy as np
+import pandas as pd
+from PIL import Image
+
+import streamlit as st
+import streamlit.components.v1 as components
+from deep_translator import GoogleTranslator
+
+# ============================ .env LOADING (no external deps) ============================
+if os.path.exists('.env'):
+    try:
+        with open('.env', 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, v = line.split('=', 1)
+                k = k.strip(); v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except Exception:
+        pass
+
+# ============================ DEFAULT CONFIG (as requested) ==============================
+DATA_ROOT = os.environ.get("HCMC_DATA_ROOT", "/mnt/shared/HCMC-AI/")
+DEFAULT_TOP_K = 10
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
+
+B1 = {
+    "clip_dir": f"{DATA_ROOT}b1/clip-features-32",
+    "map_csv": f"{DATA_ROOT}b1/map-keyframes",
+    "kf_root": f"{DATA_ROOT}b1/keyframes",
+    "vid_root": f"{DATA_ROOT}b1/video",
+    "keep_dir": f"{DATA_ROOT}b1/clip_keep_idxs",
+}
+
+B2 = {
+    "clip_dir": f"{DATA_ROOT}b2/clip-features-32",
+    "map_csv": f"{DATA_ROOT}b2/map-keyframes",
+    "kf_root": f"{DATA_ROOT}b2/keyframes",
+    "vid_root": f"{DATA_ROOT}b2/video",
+    "keep_dir": f"{DATA_ROOT}b2/clip_keep_idxs",
+}
+
+B1_DB_PATH = f"{DATA_ROOT}b1/text_bm25.db"
+B2_DB_PATH = f"{DATA_ROOT}b2/text_bm25.db"
+
+DATASETS = {"b1", "b2"}
+GEMINI_MODEL = "gemini-2.5-pro"
+GEMINI_MAX_TOKENS = 10000
+# Use GOOGLE_API_KEY for Gemini
+GEMINI_API_KEY = GOOGLE_API_KEY
+USE_LLM_ASPECTS = bool(GEMINI_API_KEY)
+WINDOW_SEC = 40.0
+SKIP_SEC = 0.0
+DELTA_SEC = 20.0
+TOP_VIDEOS = 10
+LIMIT_VIDEOS = None
+EXCLUDE_SER = set()
+
+# ================================== UTILS ===============================================
+def l2_normalize_rows(x: np.ndarray) -> np.ndarray:
+    x = x.astype("float32", copy=False)
+    n = np.linalg.norm(x, axis=1, keepdims=True) + 1e-12
+    return x / n
+
+def sec_to_mmss(t: float) -> str:
+    if t < 0 or not np.isfinite(t):
+        return "00:00"
+    m = int(t // 60)
+    s = int(round(t - m * 60))
+    if s == 60:
+        m, s = m + 1, 0
+    return f"{m:02d}:{s:02d}"
+
+def dataset_for_video(video_id: str) -> str:
+    return "b1" if video_id.startswith("L") else "b2"
+
+def keyframe_path(video_id: str, frame_id: int) -> str:
+    D = B1 if dataset_for_video(video_id) == "b1" else B2
+    L, V = video_id.split("_")
+    base = f"{D['kf_root']}/{L}/{V}"
+    digits = (3, 4) if dataset_for_video(video_id) == "b1" else (4, 3)
+    frames_try = (frame_id, max(0, frame_id - 1))
+    exts = (".jpg", ".jpeg", ".png")
+    for d in digits:
+        for fr in frames_try:
+            for ext in exts:
+                p = f"{base}/{fr:0{d}d}{ext}"
+                if os.path.exists(p):
+                    return p
+    return f"{base}/{frame_id:0{digits[0]}d}.jpg"
+
+def npy_path_for_video(video_id: str) -> str:
+    D = B1 if dataset_for_video(video_id) == "b1" else B2
+    return f"{D['clip_dir']}/{video_id}.npy"
+
+def map_csv_path_for_video(video_id: str) -> str:
+    D = B1 if dataset_for_video(video_id) == "b1" else B2
+    return f"{D['map_csv']}/{video_id}.csv"
+
+def keep_idxs_path_for_video(video_id: str) -> str:
+    D = B1 if dataset_for_video(video_id) == "b1" else B2
+    return f"{D['keep_dir']}/{video_id}_keep_idxs.npy"
+
+def safe_imread(path: str) -> Image.Image:
+    try:
+        return Image.open(path).convert("RGB")
+    except Exception:
+        return Image.fromarray(np.full((360, 640, 3), 230, dtype=np.uint8))
+
+def list_videos_from_dirs(clip_dirs: List[str],
+                          limit: Optional[int] = None,
+                          include_series: Optional[set] = None,
+                          exclude_series: Optional[set] = None,
+                          include_regex: Optional[str] = None,
+                          exclude_regex: Optional[str] = None,
+                          include_ids: Optional[set] = None,
+                          exclude_ids: Optional[set] = None) -> List[str]:
+    files = []
+    for d in clip_dirs:
+        if d and os.path.isdir(d):
+            files.extend(glob.glob(os.path.join(d, "*.npy")))
+    vids = [os.path.splitext(os.path.basename(p))[0] for p in sorted(set(files))]
+    def keep(vid: str) -> bool:
+        sid = vid.split("_", 1)[0]
+        if include_series and sid not in include_series: return False
+        if exclude_series and sid in exclude_series: return False
+        if include_ids and vid not in include_ids: return False
+        if exclude_ids and vid in exclude_ids: return False
+        if include_regex and not re.search(include_regex, vid): return False
+        if exclude_regex and re.search(exclude_regex, vid): return False
+        ds = dataset_for_video(vid)
+        if ds not in DATASETS: return False
+        return True
+    vids = [v for v in vids if keep(v)]
+    return vids[:limit] if limit else vids
+
+def load_times_for_video(video_id: str, n_feats: int) -> np.ndarray:
+    csv_path = map_csv_path_for_video(video_id)
+    if not os.path.exists(csv_path):
+        return np.linspace(0.0, float(max(n_feats - 1, 1)), num=n_feats, dtype=float)
+    df = pd.read_csv(csv_path)
+    t_all = df["pts_time"].to_numpy().astype(float)
+    keep_path = keep_idxs_path_for_video(video_id)
+    if os.path.exists(keep_path):
+        try:
+            keep = np.load(keep_path).astype(int)
+            t = t_all[np.clip(keep - 1, 0, len(t_all) - 1)]
+            if len(t) == n_feats:
+                return t
+        except Exception:
+            pass
+    if len(t_all) == n_feats:
+        return t_all
+    t_end = float(t_all[-1]) if len(t_all) else float(n_feats - 1)
+    return np.linspace(0.0, t_end, num=n_feats, dtype=float)
+
+# =============================== CLIP TEXT ENCODER ======================================
+_CLIP_RT = {"model": None, "tokenizer": None, "device": None, "backend": None}
+
+def ensure_clip_text_encoder(model_name='ViT-B-32', pretrained='openai'):
+    if _CLIP_RT["model"] is not None:
+        return
+    try:
+        import open_clip, torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
+        tokenizer = open_clip.get_tokenizer(model_name)
+        model.to(device); model.eval()
+        _CLIP_RT.update({"model": model, "tokenizer": tokenizer, "device": device, "backend": "open_clip"});
+        return
+    except Exception:
+        pass
+    try:
+        import clip, torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, _ = clip.load(model_name, device=device, jit=False)
+        _CLIP_RT.update({"model": model, "tokenizer": clip.tokenize, "device": device, "backend": "clip"});
+        return
+    except Exception:
+        raise RuntimeError("CLIP text encoder (open_clip/clip) not found.")
+
+def encode_text(texts: List[str]) -> np.ndarray:
+    ensure_clip_text_encoder()
+    import torch
+    toks = _CLIP_RT["tokenizer"](texts)
+    with torch.no_grad():
+        toks = toks.to(_CLIP_RT["device"])
+        feats = _CLIP_RT["model"].encode_text(toks)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+    return feats.detach().cpu().numpy().astype("float32")
+
+# =============================== ASPECTS + SEEDS (Gemini) ================================
+FALLBACK = {
+    "aspects": [
+        {"name": "grand sand sculpture", "prompts": [
+            "grand sand sculpture at sand sculpture festival, monumental sand art, detailed figures",
+            "large sand sculpture exhibit, festival display, intricate sand carving"
+        ], "weight": 1.0},
+        {"name": "rollerblader + two skateboarders", "prompts": [
+            "youth street sports in sand sculpture: one rollerblader and two skateboarders",
+            "skaters carved in sand: inline skates and two skateboards"
+        ], "weight": 1.35},
+        {"name": "arched backdrop with carved letters", "prompts": [
+            "large arched backdrop with carved letters, inscriptions in sand",
+            "curved arch structure with text engraved"
+        ], "weight": 0.9},
+        {"name": "multiple sand artworks", "prompts": [
+            "multiple sand sculptures on display, exhibition with several sand artworks",
+            "variety of sand art pieces shown together at festival"
+        ], "weight": 0.8},
+        {"name": "two pink smoke columns", "prompts": [
+            "two pink smoke columns, pink smoke flares near sand sculptures",
+            "pink colored smoke pillars beside sand sculpture"
+        ], "weight": 1.35}
+    ],
+    "seeds": {
+        "unigrams": ["điêu","khắc","cát","lễ","hội","tác","phẩm","trượt","patin","ván","skate","skateboard",
+                      "vòm","cong","chữ","khói","hồng","cột","màu","thanh","niên"],
+        "phrases":  ["điêu khắc cát","lễ hội điêu khắc","tác phẩm điêu khắc","trượt patin","trượt ván",
+                      "vòm cong","khắc chữ","khói hồng","khói màu hồng","cột khói"]
+    }
+}
+
+def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.7, top_p: float = 0.9) -> Dict:
+    if not (USE_LLM_ASPECTS and GEMINI_API_KEY):
+        print("[Gemini] Using FALLBACK aspects/seeds (no API key)")
+        return FALLBACK
+    sys_inst = (
+        "Bạn là công cụ xây dựng truy vấn cho video retrieval.\n"
+        "- Đầu vào: miêu tả TỰ NHIÊN (tiếng Việt/Anh).\n"
+        "- Đầu ra: JSON với hai trường: 'aspects' và 'seeds'.\n"
+        "  * aspects: mảng 1..N phần tử. Mỗi phần tử có name, prompts(2-4 EN), weight>0.\n"
+        "  * seeds: { 'unigrams': ≤28, 'phrases': ≤18 } bằng TIẾNG VIỆT.\n"
+        "JSON hợp lệ, không kèm bình luận."
+    )
+    payload = {"query_vi": query_vi}
+    try:
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        try:
+            resp = client.responses.generate(
+                model=GEMINI_MODEL,
+                input=json.dumps(payload, ensure_ascii=False),
+                system_instruction=sys_inst,
+                config={"max_output_tokens": GEMINI_MAX_TOKENS,
+                        "response_mime_type": "application/json"}
+            )
+            txt = getattr(resp, "output_text", None)
+            if not txt:
+                raise RuntimeError("Empty output_text")
+        except Exception:
+            cfg = genai.types.GenerateContentConfig(
+                max_output_tokens=GEMINI_MAX_TOKENS,
+                response_mime_type="application/json",
+                system_instruction=sys_inst,
+                temperature=temperature,
+                top_p=top_p
+            )
+            resp = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=json.dumps(payload, ensure_ascii=False),
+                config=cfg
+            )
+            txt = getattr(resp, "text", None) or getattr(resp, "output_text", None)
+            if not txt:
+                raise RuntimeError("Empty text")
+        data = json.loads(txt)
+        if "aspects" not in data or not isinstance(data["aspects"], list):
+            raise ValueError("no aspects")
+        if "seeds" not in data or not isinstance(data["seeds"], dict):
+            data["seeds"] = {"unigrams": [], "phrases": []}
+        return data
+    except Exception as e:
+        print(f"[Gemini] Call failed: {e}")
+        print("[Gemini] Using fallback translation method...")
+        aspects, seeds = fallback_translate_and_create_aspects(query_vi)
+        return {"aspects": aspects, "seeds": seeds}
+
+# =============================== BUILD QUERY VECTORS ====================================
+
+def build_query_vecs_for_aspects(aspects: List[Dict]) -> Tuple[List[np.ndarray], List[str], List[float]]:
+    all_prompts, ranges, names, weights = [], [], [], []
+    for a in aspects:
+        ps = list(dict.fromkeys(a.get("prompts", [])))
+        s = len(all_prompts)
+        all_prompts.extend(ps)
+        ranges.append((s, len(all_prompts)))
+        names.append(a.get("name", "aspect"))
+        weights.append(float(a.get("weight", 1.0)))
+    if not all_prompts:
+        all_prompts = ["generic scene"]; ranges = [(0, 1)]; names = ["generic"]; weights = [1.0]
+    q = encode_text(all_prompts).astype("float32")
+    q = l2_normalize_rows(q)
+    q_per_aspect = [q[s:e] for (s, e) in ranges]
+    return q_per_aspect, names, weights
+
+# =============================== WINDOW SCORING (CLIP) ==================================
+
+def best_window_multi_aspect(feats: np.ndarray, times: np.ndarray,
+                             q_per_aspect: List[np.ndarray],
+                             aspect_weights: List[float],
+                             window_sec: float = 40.0,
+                             min_start_sec: float = 0.0):
+    N = feats.shape[0]
+    if N == 0:
+        return {"score": -1e9, "i0": 0, "i1": 0, "t0": 0.0, "t1": 0.0,
+                "aspect_frames": [1] * len(q_per_aspect), "aspect_scores": [0.0] * len(q_per_aspect)}
+    start_idx = int(np.searchsorted(times, min_start_sec, side="left"))
+    start_idx = min(max(start_idx, 0), N - 1)
+    feats = feats[start_idx:]; times = times[start_idx:]; Nsub = feats.shape[0]
+    sims_list = []
+    for qA in q_per_aspect:
+        sims = (qA @ feats.T) if len(qA) > 0 else np.zeros((1, Nsub), dtype="float32")
+        sims_list.append(sims.max(axis=0).astype("float32"))
+    deques = [deque() for _ in range(len(sims_list))]
+    best = {"score": -1e9, "i0": 0, "i1": 0, "peaks": [(0, 0.0)] * len(sims_list)}
+    e = 0
+    for i in range(Nsub):
+        while e < Nsub and (times[e] - times[i] <= window_sec):
+            for j, s in enumerate(sims_list):
+                dq = deques[j]; val = float(s[e])
+                while dq and dq[-1][1] <= val:
+                    dq.pop()
+                dq.append((e, val))
+            e += 1
+        win_sum, peaks = 0.0, []
+        for j, dq in enumerate(deques):
+            idx, val = (dq[0] if dq else (i, float("-inf")))
+            peaks.append((idx, val)); win_sum += float(aspect_weights[j]) * val
+        if win_sum > best["score"]:
+            best = {"score": win_sum, "i0": i, "i1": e - 1, "peaks": peaks}
+        for dq in deques:
+            if dq and dq[0][0] == i:
+                dq.popleft()
+    aspect_frames = [int(start_idx + idx + 1) for (idx, _v) in best["peaks"]]
+    aspect_scores = [float(_v) for (_idx, _v) in best["peaks"]]
+    i0, i1 = best["i0"], best["i1"]
+    t0 = float(times[i0]); t1 = float(times[min(i1, len(times) - 1)])
+    return {"score": float(best["score"]),
+            "i0": int(start_idx + i0), "i1": int(start_idx + i1),
+            "t0": t0, "t1": t1,
+            "aspect_frames": aspect_frames, "aspect_scores": aspect_scores}
+
+def score_video_clip_window(video_id: str,
+                            q_per_aspect: List[np.ndarray],
+                            aspect_weights: List[float],
+                            window_sec=40.0, min_start_sec=0.0):
+    npy_path = npy_path_for_video(video_id)
+    if not os.path.exists(npy_path):
+        return {"video_id": video_id, "ok": False, "error": "no npy"}
+    feats = np.load(npy_path).astype("float32")
+    feats = l2_normalize_rows(feats)
+    times = load_times_for_video(video_id, len(feats))
+    win = best_window_multi_aspect(feats, times, q_per_aspect, aspect_weights,
+                                   window_sec=window_sec, min_start_sec=min_start_sec)
+    return {"video_id": video_id, "ok": True, "total": win["score"], "win": win}
+
+def rank_videos_clip_window(aspects: List[Dict],
+                            limit_videos=None, window_sec=40.0, min_start_sec=0.0,
+                            include_series: set | None = None,
+                            exclude_series: set | None = None,
+                            include_regex: str | None = None,
+                            exclude_regex: str | None = None,
+                            include_ids: set | None = None,
+                            exclude_ids: set | None = None):
+    clip_dirs = []
+    if "b1" in DATASETS: clip_dirs.append(B1["clip_dir"])
+    if "b2" in DATASETS: clip_dirs.append(B2["clip_dir"])
+    vids = list_videos_from_dirs(
+        clip_dirs,
+        limit=limit_videos,
+        include_series=include_series, exclude_series=exclude_series,
+        include_regex=include_regex, exclude_regex=exclude_regex,
+        include_ids=include_ids, exclude_ids=exclude_ids
+    )
+    print(f"[CLIP-RANK] Found {len(vids)} videos to score from datasets: {DATASETS}")
+    q_per_aspect, names, weights = build_query_vecs_for_aspects(aspects)
+    out = []
+    scored_count = 0
+    for vid in vids:
+        r = score_video_clip_window(vid, q_per_aspect, weights, window_sec=window_sec, min_start_sec=min_start_sec)
+        scored_count += 1
+        if r["ok"]:
+            out.append(r)
+    print(f"[CLIP-RANK] Successfully scored {scored_count} videos, {len(out)} returned valid results")
+    out.sort(key=lambda x: x["total"], reverse=True)
+    return out, names, weights
+
+# ============================== TEXT RERANK (ULTRA-WIN) =================================
+
+def _tok_vi(s):
+    return re.findall(r"[0-9]+|[A-Za-zÀ-ỹĐđ]+", s.lower())
+
+def build_keyword_sets(query_vi: str, seeds: Dict, max_unigrams=28, max_phrases=18):
+    toks = _tok_vi(query_vi)
+    unigrams = {t for t in toks if len(t) >= 2}
+    phrases = {" ".join(toks[i:i + 2]) for i in range(len(toks) - 1)}
+    unigrams.update(seeds.get("unigrams", []))
+    phrases.update(seeds.get("phrases", []))
+    uni = sorted(list(unigrams))[:max_unigrams]
+    phr = sorted(list(phrases))[:max_phrases]
+    q_any = " OR ".join(uni + [f'"{p}"' for p in phr]) if (uni or phr) else None
+    q_phr = " OR ".join([f'"{p}"' for p in phr]) if phr else None
+    return uni, phr, q_any, q_phr
+
+def _connect_ro(db_path: str):
+    uri = f"file:{db_path}?immutable=1&mode=ro"
+    return sqlite3.connect(uri, uri=True, check_same_thread=False)
+
+def _count_one(db_path: str, vid: str, t0: float, t1: float, q_any: str | None, q_phr: str | None):
+    conn = _connect_ro(db_path)
+    cur = conn.cursor()
+    sql = "SELECT COUNT(*) FROM docs WHERE video_id=? AND t BETWEEN ? AND ? AND docs MATCH ?"
+    h_any = h_phr = 0
+    if q_any:
+        h_any = cur.execute(sql, (vid, t0, t1, q_any)).fetchone()[0]
+    if q_phr:
+        h_phr = cur.execute(sql, (vid, t0, t1, q_phr)).fetchone()[0]
+    conn.close()
+    return (vid, int(h_any), int(h_phr))
+
+def _alias_windows_and_dbpaths(windows):
+    g = {"b1": [], "b2": []}
+    for w in windows:
+        (g["b1"] if w["video_id"].startswith("L") else g["b2"]).append(w)
+    out = []
+    if g["b1"] and os.path.exists(B1_DB_PATH): out.append(("b1", B1_DB_PATH, g["b1"]))
+    if g["b2"] and os.path.exists(B2_DB_PATH): out.append(("b2", B2_DB_PATH, g["b2"]))
+    return out
+
+def rerank_with_transcript_ultra_window(
+    clip_results: list,
+    query_vi: str,
+    seeds: dict,
+    top_candidates: int = 60,
+    delta_sec: float = 10.0,
+    w_clip: float = 0.6, w_text: float = 0.4,
+    text_weights: dict | None = None,
+    verbose: bool = True, timing: bool = True,
+    *,
+    workers: int = 8,
+    phrases_only: bool = False,
+    max_unigrams: int = 16, max_phrases: int = 10
+):
+    if text_weights is None:
+        text_weights = {"any": 0.5, "phr": 0.5}
+    t0 = time.perf_counter()
+    cand = [{"video_id": r["video_id"], "clip_total": float(r["total"]),
+             "t0": max(0.0, float(r["win"]["t0"]) - float(delta_sec)),
+             "t1": float(r["win"]["t1"]) + float(delta_sec)}
+            for r in clip_results[:top_candidates]]
+    df = pd.DataFrame(cand)
+    if df.empty:
+        return df
+    uni, phr, q_any, q_phr = build_keyword_sets(
+        query_vi, seeds,
+        max_unigrams=(0 if phrases_only else max_unigrams),
+        max_phrases=max_phrases
+    )
+    if phrases_only:
+        q_any = None
+    parts = []
+    for _al, db_path, wins in _alias_windows_and_dbpaths(cand):
+        rows = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            futures = [ex.submit(_count_one, db_path, w["video_id"], float(w["t0"]), float(w["t1"]), q_any, q_phr)
+                       for w in wins]
+            for fut in concurrent.futures.as_completed(futures):
+                rows.append(fut.result())
+        parts.append(pd.DataFrame(rows, columns=["video_id", "hits_any", "hits_phr"]))
+    text_df = (pd.concat(parts, ignore_index=True)
+               if parts else pd.DataFrame(columns=["video_id", "hits_any", "hits_phr"]))
+    def _minmax(x):
+        x = x.astype(float); mn, mx = x.min(), x.max()
+        if mx - mn < 1e-9:
+            return np.ones_like(x, dtype=float)
+        return (x - mn) / (mx - mn)
+    df = df.merge(text_df, on="video_id", how="left").fillna({"hits_any": 0, "hits_phr": 0})
+    df["clip_n"] = _minmax(df["clip_total"].values)
+    df["any_n"] = _minmax(df["hits_any"].values)
+    df["phr_n"] = _minmax(df["hits_phr"].values)
+    a, b = text_weights["any"], text_weights["phr"]
+    df["text_score"] = a * df["any_n"] + b * df["phr_n"]
+    df["fused"] = w_clip * df["clip_n"] + w_text * df["text_score"]
+    df = df.sort_values("fused", ascending=False).reset_index(drop=True)
+    if verbose:
+        print(f"[ULTRA-WIN] fused = {w_clip}*clip + {w_text}*( {a}*hits_any + {b}*hits_phr ) | Δ={delta_sec}s | workers={workers} | phrases_only={phrases_only}")
+        # Removed printing the full head table in logs to avoid duplication; table is rendered via Streamlit.
+        # (kept summary line above)
+
+    if timing:
+        print(f"[ULTRA-WIN] elapsed: {time.perf_counter() - t0:.3f}s (candidates={len(df)})")
+    return df
+
+def reorder_results_by_df(orig_results, ranked_df, top_videos=10):
+    order = ranked_df.head(top_videos)["video_id"].tolist()
+    vid2r = {r["video_id"]: r for r in orig_results}
+    return [vid2r[v] for v in order if v in vid2r]
+
+# =============================== MEDIA INFO (watch_url) ==================================
+
+def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25.0) -> str:
+    """Create HTML with working YouTube API and FPS-based frame calculation"""
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>YouTube Player</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 10px; }}
+            .container {{ display: flex; gap: 20px; }}
+            .info-panel {{ flex: 1; background: #2e2e2e; padding: 20px; border-radius: 8px; color: white; }}
+            .video-panel {{ flex: 2; }}
+            .time-display {{ font-size: 24px; color: #00ff00; margin: 10px 0; }}
+            .frame-display {{ font-size: 20px; color: #ff6b6b; margin: 10px 0; }}
+            iframe {{ width: 100%; height: 500px; }}
+            .status {{ margin: 10px 0; }}
+            .debug {{ background: #1a1a1a; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px; max-height: 150px; overflow-y: auto; }}
+            .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
+            .info-item {{ background: #3a3a3a; padding: 8px; border-radius: 4px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="info-panel">
+                <h4>Current Time:</h4>
+                <div class="time-display" id="current-time-{video_id}">{start_time:.1f}s</div>
+                
+                <h4>Current Frame:</h4>
+                <div class="frame-display" id="current-frame-{video_id}">{int(start_time * fps)}</div>
+                
+                <div class="status">
+                    <p><strong>Start Time:</strong> {start_time:.1f}s</p>
+                    <p><strong>Start Frame:</strong> {int(start_time * fps)}</p>
+                    <p><strong>FPS:</strong> {fps}</p>
+                    <p><strong>Status:</strong> <span id="status-{video_id}">Initializing...</span></p>
+                    <p><strong>Player State:</strong> <span id="player-state-{video_id}">Unknown</span></p>
+                </div>
+                
+                <div class="info-grid">
+                    <div class="info-item">
+                        <strong>Time Format:</strong><br>
+                        <span id="time-formatted-{video_id}">00:13:53</span>
+                    </div>
+                    <div class="info-item">
+                        <strong>Frame Rate:</strong><br>
+                        <span id="fps-display-{video_id}">{fps} fps</span>
+                    </div>
+                </div>
+                
+                <h4>Debug Log:</h4>
+                <div class="debug" id="debug-log-{video_id}">
+                    <div>Loading YouTube API...</div>
+                </div>
+            </div>
+            
+            <div class="video-panel">
+                <h4>Video Player:</h4>
+                <iframe id="ytplayer-{video_id}" 
+                        src="https://www.youtube.com/embed/{video_id}?start={start_time}&enablejsapi=1"
+                        frameborder="0" 
+                        allowfullscreen>
+                </iframe>
+            </div>
+        </div>
+
+        <script>
+            var player_{video_id.replace('-', '_')};
+            var timeUpdateInterval_{video_id.replace('-', '_')};
+            var debugCount_{video_id.replace('-', '_')} = 0;
+            var fps = {fps};
+            var startTime = {start_time};
+            
+            // Load YouTube API
+            var tag = document.createElement('script');
+            tag.src = "https://www.youtube.com/iframe_api";
+            var firstScriptTag = document.getElementsByTagName('script')[0];
+            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+            
+            function addDebugLog_{video_id.replace('-', '_')}(message) {{
+                debugCount_{video_id.replace('-', '_')}++;
+                var debugEl = document.getElementById('debug-log-{video_id}');
+                var timestamp = new Date().toLocaleTimeString();
+                debugEl.innerHTML += `<div>[${{timestamp}}] ${{debugCount_{video_id.replace('-', '_')}}}: ${{message}}</div>`;
+                console.log(`[${{timestamp}}] ${{message}}`);
+            }}
+            
+            function formatTime(seconds) {{
+                var hours = Math.floor(seconds / 3600);
+                var minutes = Math.floor((seconds % 3600) / 60);
+                var secs = Math.floor(seconds % 60);
+                return `${{hours.toString().padStart(2, '0')}}:${{minutes.toString().padStart(2, '0')}}:${{secs.toString().padStart(2, '0')}}`;
+            }}
+            
+            function calculateFrame(timeInSeconds) {{
+                return Math.floor(timeInSeconds * fps);
+            }}
+            
+            function updateTimeAndFrame_{video_id.replace('-', '_')}() {{
+                if (player_{video_id.replace('-', '_')} && typeof player_{video_id.replace('-', '_')}.getCurrentTime === 'function') {{
+                    try {{
+                        var currentTime = player_{video_id.replace('-', '_')}.getCurrentTime();
+                        var currentFrame = calculateFrame(currentTime);
+                        var formattedTime = formatTime(currentTime);
+                        
+                        addDebugLog_{video_id.replace('-', '_')}(`Time: ${{currentTime.toFixed(2)}}s, Frame: ${{currentFrame}}`);
+                        
+                        // Update time display
+                        var timeEl = document.getElementById('current-time-{video_id}');
+                        if (timeEl && currentTime !== undefined) {{
+                            timeEl.textContent = currentTime.toFixed(1) + 's';
+                        }}
+                        
+                        // Update frame display
+                        var frameEl = document.getElementById('current-frame-{video_id}');
+                        if (frameEl) {{
+                            frameEl.textContent = currentFrame;
+                        }}
+                        
+                        // Update formatted time
+                        var formattedEl = document.getElementById('time-formatted-{video_id}');
+                        if (formattedEl) {{
+                            formattedEl.textContent = formattedTime;
+                        }}
+                        
+                    }} catch (e) {{
+                        addDebugLog_{video_id.replace('-', '_')}(`Error getting current time: ${{e.message}}`);
+                    }}
+                }} else {{
+                    addDebugLog_{video_id.replace('-', '_')}('Player not ready or getCurrentTime not available');
+                }}
+            }}
+            
+            function onYouTubeIframeAPIReady() {{
+                addDebugLog_{video_id.replace('-', '_')}('YouTube API ready, initializing player');
+                
+                player_{video_id.replace('-', '_')} = new YT.Player('ytplayer-{video_id}', {{
+                    events: {{
+                        'onReady': onPlayerReady_{video_id.replace('-', '_')},
+                        'onStateChange': onPlayerStateChange_{video_id.replace('-', '_')}
+                    }}
+                }});
+            }}
+            
+            function onPlayerReady_{video_id.replace('-', '_')}(event) {{
+                addDebugLog_{video_id.replace('-', '_')}('Player ready, starting time updates');
+                document.getElementById('status-{video_id}').textContent = 'Player Ready';
+                startTimeUpdates_{video_id.replace('-', '_')}();
+            }}
+            
+            function onPlayerStateChange_{video_id.replace('-', '_')}(event) {{
+                var stateNames = {{
+                    0: 'Ended',
+                    1: 'Playing', 
+                    2: 'Paused',
+                    3: 'Buffering',
+                    5: 'Cued'
+                }};
+                var stateName = stateNames[event.data] || 'Unknown';
+                addDebugLog_{video_id.replace('-', '_')}(`Player state changed to: ${{event.data}} (${{stateName}})`);
+                document.getElementById('player-state-{video_id}').textContent = stateName;
+                updateTimeAndFrame_{video_id.replace('-', '_')}();
+            }}
+            
+            function startTimeUpdates_{video_id.replace('-', '_')}() {{
+                if (timeUpdateInterval_{video_id.replace('-', '_')}) {{
+                    clearInterval(timeUpdateInterval_{video_id.replace('-', '_')});
+                }}
+                
+                timeUpdateInterval_{video_id.replace('-', '_')} = setInterval(function() {{
+                    updateTimeAndFrame_{video_id.replace('-', '_')}();
+                }}, 200); // Update every 200ms for smooth frame updates
+            }}
+            
+            // Fallback initialization
+            setTimeout(function() {{
+                if (!player_{video_id.replace('-', '_')} && typeof YT !== 'undefined' && YT.Player) {{
+                    addDebugLog_{video_id.replace('-', '_')}('Fallback initialization triggered');
+                    onYouTubeIframeAPIReady();
+                }} else if (!player_{video_id.replace('-', '_')}) {{
+                    addDebugLog_{video_id.replace('-', '_')}('Fallback failed - YT API still not ready');
+                }}
+            }}, 3000);
+            
+            addDebugLog_{video_id.replace('-', '_')}('Page loaded, waiting for YouTube API...');
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
+
+def fallback_translate_and_create_aspects(query_vi: str) -> Tuple[List[Dict], Dict]:
+    """Fallback: translate query to English and create aspects from each line"""
+    try:
+        # Split query into lines and translate each to English
+        lines = [line.strip() for line in query_vi.split('\n') if line.strip()]
+        translated_lines = []
+        
+        for line in lines:
+            try:
+                # Detect language and translate to English if needed
+                translator = GoogleTranslator(source='auto', target='en')
+                translated = translator.translate(line)
+                translated_lines.append(translated)
+            except Exception as e:
+                print(f"Translation error for '{line}': {e}")
+                translated_lines.append(line)  # Use original if translation fails
+        
+        # Create aspects from translated lines
+        aspects = []
+        for i, line in enumerate(translated_lines):
+            aspect = {
+                "name": f"aspect_{i+1}",
+                "prompts": [line],  # Use translated line as single prompt
+                "weight": 1.0
+            }
+            aspects.append(aspect)
+        
+        # Create minimal seeds (empty for fallback)
+        seeds = {
+            "unigrams": [],
+            "phrases": []
+        }
+        
+        return aspects, seeds
+        
+    except Exception as e:
+        print(f"Fallback translation failed: {e}")
+        # Ultimate fallback: single aspect with original query
+        aspects = [{
+            "name": "fallback_aspect",
+            "prompts": [query_vi],
+            "weight": 1.0
+        }]
+        seeds = {"unigrams": [], "phrases": []}
+        return aspects, seeds
+
+def get_fps_from_csv(video_id: str) -> float:
+    """Get FPS from map-keyframes CSV file"""
+    csv_paths = [
+        f"/mnt/shared/HCMC-AI/b1/map-keyframes/{video_id}.csv",
+        f"/mnt/shared/HCMC-AI/b2/map-keyframes/{video_id}.csv",
+    ]
+    
+    for csv_path in csv_paths:
+        try:
+            if os.path.exists(csv_path):
+                df = pd.read_csv(csv_path)
+                if 'fps' in df.columns and len(df) > 0:
+                    # Return the first FPS value (should be consistent)
+                    fps = df['fps'].iloc[0]
+                    return float(fps)
+        except Exception as e:
+            print(f"Error reading FPS from {csv_path}: {e}")
+            continue
+    
+    # Default FPS if not found
+    return 25.0
+
+def get_watch_url(video_id: str) -> Optional[str]:
+    # Try media-info directories for {video_id}.json with a 'watch_url' field
+    media_info_dirs = [
+        "/mnt/shared/HCMC-AI/b1/media-info/",
+        "/mnt/shared/HCMC-AI/b2/media-info/",
+    ]
+    candidates = [Path(media_dir) / f"{video_id}.json" for media_dir in media_info_dirs]
+    
+    for p in candidates:
+        try:
+            if p.exists():
+                data = json.loads(Path(p).read_text(encoding='utf-8'))
+                url = data.get("watch_url")
+                if url:
+                    return url
+        except Exception:
+            continue
+    return None
+
+# =============================== STREAMLIT UI ============================================
+st.set_page_config(page_title="HCMC AI 2025 – Multi-Aspect Search", layout="wide")
+
+# Row 1: Title
+st.title("HCMC AI 2025 – Multi-Aspect Search (CLIP + Transcript Rerank)")
+
+# Row 2: Batch selection (collapsible)
+with st.expander("Select Dataset Batch", expanded=False):
+    batch_label = st.selectbox("Dataset Batch:", ["Both Batches", "Batch 1", "Batch 2"], index=0)
+if batch_label == "Batch 1":
+    DATASETS = {"b1"}
+elif batch_label == "Batch 2":
+    DATASETS = {"b2"}
+else:
+    DATASETS = {"b1", "b2"}
+
+# Row 2.5: Gemini API Configuration and Testing
+with st.expander("🔑 Gemini API Configuration", expanded=False):
+    st.markdown("**Configure and test your Gemini API connection**")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    # API Key input
+    api_key = st.text_input(
+        "Gemini API Key:",
+        value=GOOGLE_API_KEY,
+        type="password",
+        help="Enter your Google Gemini API key. You can get one from https://makersuite.google.com/app/apikey"
+    )
+
+    # Update the global API key if changed
+    if api_key and api_key != GOOGLE_API_KEY:
+        GOOGLE_API_KEY = api_key
+        os.environ["GOOGLE_API_KEY"] = api_key
+
+    # Gemini Configuration Options (only show if API key is configured)
+    if api_key and api_key.strip():
+        st.markdown("**Model Configuration:**")
+        col_temp, col_topp = st.columns(2)
+
+        with col_temp:
+            gemini_temperature = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=2.0,
+                value=0.7,
+                step=0.1,
+                help="Controls randomness. Lower = more focused, Higher = more creative"
+            )
+
+        with col_topp:
+            gemini_top_p = st.slider(
+                "Top P",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.9,
+                step=0.05,
+                help="Controls diversity. Lower = more focused, Higher = more diverse"
+            )
+
+    test_button = st.button("🧪 Test Gemini API", type="primary")
+    
+    # Test API connection
+    if test_button:
+        if not api_key:
+            st.error("❌ Please enter your Gemini API key first!")
+        else:
+            with st.spinner("Testing Gemini API connection..."):
+                try:
+                    # Test with a simple prompt
+                    test_prompt = "Hello! Please respond with 'API connection successful' if you can read this message."
+                    
+                    # Import and test Gemini
+                    import google.generativeai as genai
+                    genai.configure(api_key=api_key)
+                    model = genai.GenerativeModel('gemini-2.5-pro')
+                    
+                    response = model.generate_content(test_prompt)
+                    response_text = response.text.strip()
+                    
+                    if response_text:
+                        st.success(f"✅ **Gemini API Test Successful!**")
+                        st.info(f"**Response:** {response_text}")
+                        st.markdown("🎉 Your Gemini API is working correctly and ready to use!")
+                    else:
+                        st.warning("⚠️ **API responded but with empty content**")
+                        st.markdown("The API connection works but returned no content.")
+                        
+                except Exception as e:
+                    st.error(f"❌ **Gemini API Test Failed!**")
+                    st.error(f"**Error:** {str(e)}")
+                    st.markdown("**Common issues:**")
+                    st.markdown("- Invalid API key")
+                    st.markdown("- API quota exceeded")
+                    st.markdown("- Network connectivity issues")
+                    st.markdown("- API service temporarily unavailable")
+    
+    # Show current status
+    if GOOGLE_API_KEY:
+        st.success("🔑 **API Key Status:** Configured")
+    else:
+        st.warning("⚠️ **API Key Status:** Not configured")
+
+# Row 3: Query input
+rerank_enabled = st.checkbox("Search with Transcript Rerank", value=False)
+query_vi = st.text_area("Enter Query:", height=120, placeholder="Nhập miêu tả truy vấn tiếng Việt / English ...")
+
+# Button styling for full width
+st.markdown(
+    """
+    <style>
+    .stButton > button {
+        width: 100% !important;
+        font-size: 18px !important;
+        font-weight: bold !important;
+        border-radius: 8px !important;
+        margin: 0 !important;
+        padding: 0.75rem 1rem !important;
+        display: block !important;
+    }
+    .stButton {
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    .main .block-container {
+        padding-left: 1rem !important;
+        padding-right: 1rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Initialize session state for query enhancement
+if 'query_enhanced' not in st.session_state:
+    st.session_state.query_enhanced = False
+if 'enhanced_data' not in st.session_state:
+    st.session_state.enhanced_data = None
+
+# Row 4: Query buttons - Conditional display based on Gemini API status
+run = False  # Initialize run variable
+
+# Check if Gemini API is configured
+gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
+
+# Default values for Gemini parameters (when API is not configured)
+gemini_temperature = 0.7
+gemini_top_p = 0.9
+
+if gemini_configured:
+    # Gemini is configured - show Enhance Query first, then Run Query
+    if not st.session_state.query_enhanced:
+        # Show Enhance Query button (Green, full width)
+        enhance_button = st.button("🌱 Enhance Query", use_container_width=True, type="primary")
+        if enhance_button:
+            if not query_vi.strip():
+                st.error("Please enter a query first!")
+            else:
+                with st.spinner("Enhancing query with Gemini..."):
+                    try:
+                        enhanced_data = extract_aspects_and_seeds_with_gemini(query_vi, gemini_temperature, gemini_top_p)
+                        st.session_state.enhanced_data = enhanced_data
+                        st.session_state.query_enhanced = True
+                        st.success("✅ Query enhanced successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to enhance query: {e}")
+    else:
+        # Show Run Query button (Red, full width) after enhancement
+        run_button = st.button("🚀 Run Query", use_container_width=True, type="secondary")
+        if run_button:
+            run = True
+
+        # Reset button
+        if st.button("🔄 Reset Query", help="Clear enhanced query and start over"):
+            st.session_state.query_enhanced = False
+            st.session_state.enhanced_data = None
+            st.rerun()
+else:
+    # Gemini not configured - show Run Query directly with fallback
+    run_button = st.button("🚀 Run Query", use_container_width=True, type="primary")
+    if run_button:
+        if not query_vi.strip():
+            st.error("Please enter a query first!")
+        else:
+            run = True
+            # Use fallback translation directly
+            st.info("ℹ️ **Using Fallback Translation** - Configure Gemini API for better results")
+
+# Row 5: Logs expander
+log_exp = st.expander("Logs", expanded=False)
+log_container = log_exp.empty()
+
+def run_with_logs(fn, *args, **kwargs):
+    buf = io.StringIO()
+    try:
+        import contextlib
+        with contextlib.redirect_stdout(buf):
+            return fn(*args, **kwargs), buf
+    except Exception as e:
+        print(f"[ERROR] {fn.__name__}: {e}")
+        return None, buf
+    finally:
+        pass  # Don't update log here, we'll handle it manually
+
+# Row 6: Config expander
+with st.expander("Config", expanded=False):
+    b1_db = st.text_input("Text BM25 B1 DB Path", value=B1_DB_PATH)
+    b2_db = st.text_input("Text BM25 B2 DB Path", value=B2_DB_PATH)
+    top_k = st.number_input("Top-K videos", min_value=1, max_value=200, value=DEFAULT_TOP_K, step=1)
+    b1_clip = st.text_input("CLIP features B1 dir", value=B1["clip_dir"])
+    b2_clip = st.text_input("CLIP features B2 dir", value=B2["clip_dir"])
+
+# Apply editable config for runtime
+B1_DB_PATH = b1_db or B1_DB_PATH
+B2_DB_PATH = b2_db or B2_DB_PATH
+B1["clip_dir"] = b1_clip or B1["clip_dir"]
+B2["clip_dir"] = b2_clip or B2["clip_dir"]
+TOP_VIDEOS = int(top_k)
+
+# Row 7 & 8: Results areas (placeholders)
+clip_results_container = st.empty()
+rerank_results_container = st.empty()
+
+if run:
+    # Use enhanced data from session state or fallback translation
+    if st.session_state.enhanced_data:
+        spec = st.session_state.enhanced_data
+        gemini_log = "Query enhanced successfully with Gemini API"
+    elif gemini_configured:
+        # Fallback if no enhanced data but Gemini is configured
+        with log_container.container():
+            st.text("Running extract_aspects_and_seeds_with_gemini() ...")
+        (spec, buf) = run_with_logs(extract_aspects_and_seeds_with_gemini, query_vi, gemini_temperature, gemini_top_p)
+        if spec is None:
+            st.error("Failed to extract aspects/seeds. See logs.")
+            st.stop()
+        gemini_log = buf.getvalue() if buf else ""
+    else:
+        # Gemini not configured - use fallback translation directly
+        with log_container.container():
+            st.text("Using fallback translation method...")
+        aspects, seeds = fallback_translate_and_create_aspects(query_vi)
+        spec = {"aspects": aspects, "seeds": seeds}
+        gemini_log = "Using fallback translation method (Gemini API not configured)"
+    
+    # Show Gemini call result first
+    with log_container.container():
+        st.text(gemini_log)
+    
+    # Then show the extracted aspects
+    ASPECTS = spec.get("aspects", [])
+    SEEDS = spec.get("seeds", {})
+    _aspect_lines = ["Aspects:"]
+    for a in ASPECTS:
+        aspect_name = a.get('name', 'unnamed')
+        weight = float(a.get('weight', 1.0))
+        prompts = a.get('prompts', [])
+        _aspect_lines.append(f"- **Aspect: {aspect_name}** (w={weight:.2f})")
+        for prompt in prompts:
+            _aspect_lines.append(f"  + Prompt: {prompt}")
+    
+    # Add seeds display
+    _aspect_lines.append("\nSeeds:")
+    unigrams = SEEDS.get("unigrams", [])
+    phrases = SEEDS.get("phrases", [])
+    if unigrams:
+        _aspect_lines.append(f"- Unigrams ({len(unigrams)}): {', '.join(unigrams[:10])}{'...' if len(unigrams) > 10 else ''}")
+    if phrases:
+        _aspect_lines.append(f"- Phrases ({len(phrases)}): {', '.join(phrases[:5])}{'...' if len(phrases) > 5 else ''}")
+    
+    _aspects_header = "\n".join(_aspect_lines)
+    
+    # Check if using fallback and show notification
+    if "fallback" in gemini_log.lower() or "translation" in gemini_log.lower():
+        st.warning("⚠️ **Using Fallback Translation Method**")
+        st.info("🔍 **Note:** When using fallback translation, transcript rerank may not work optimally as it relies on Vietnamese seeds for better matching.")
+    
+    # Display Gemini call and aspects
+    def update_log():
+        with log_container.container():
+            st.text(gemini_log)
+            st.markdown(_aspects_header)
+    
+    update_log()
+
+    # 1) CLIP rank
+    clip_dirs = []
+    if "b1" in DATASETS: clip_dirs.append(B1["clip_dir"])  # for visibility in logs
+    if "b2" in DATASETS: clip_dirs.append(B2["clip_dir"])  # for visibility in logs
+    print_msg = f"[Rank] DATASETS={DATASETS} | clip_dirs={clip_dirs} | window={WINDOW_SEC}s | skip={SKIP_SEC}s"
+    (rank_out, buf2) = run_with_logs(
+        rank_videos_clip_window,
+        ASPECTS,
+        LIMIT_VIDEOS,
+        WINDOW_SEC,
+        SKIP_SEC,
+        None,
+        EXCLUDE_SER,
+        None,
+        None,
+        None,
+        None,
+    )
+    if rank_out is None:
+        st.error("Ranking failed. See logs.")
+        st.stop()
+    (results, aspect_names, aspect_weights) = rank_out
+    # Add CLIP rank results to logs
+    def update_log():
+        with log_container.container():
+            st.text(gemini_log)
+            st.markdown(_aspects_header)
+            st.text(print_msg)
+            st.text(buf2.getvalue() if buf2 else "")
+    
+    update_log()
+
+    # Row 7: Show CLIP results only when rerank is disabled
+    if not rerank_enabled:
+        with clip_results_container.container():
+            st.subheader("CLIP Multi-Aspects Results")
+            if not results:
+                st.info("No results found (check feature directories and dataset selection).")
+            else:
+                rows = min(TOP_VIDEOS, len(results))
+                for i in range(rows):
+                    r = results[i]
+                    vid, win = r["video_id"], r["win"]
+                    t0s, t1s = sec_to_mmss(win['t0']), sec_to_mmss(win['t1'])
+                    with st.container():
+                        st.markdown(f"**[{i+1}] {vid}** · total={r['total']:.3f} · win: {t0s} → {t1s}")
+                        cols = st.columns(len(aspect_names))
+                        for j, col in enumerate(cols):
+                            with col:
+                                frame = int(win["aspect_frames"][j])
+                                score = float(win["aspect_scores"][j])
+                                img = safe_imread(keyframe_path(vid, frame))
+                                st.image(img, caption="")
+                                st.markdown(f"**{aspect_names[j]}**")
+                                st.markdown(f"frame={frame} s={score:.3f}")
+                    url = get_watch_url(vid)
+                    if url:
+                        # Watch Video button with popover
+                        with st.popover("🎥 Watch Video", use_container_width=True):
+                            st.markdown(f"**Video:** {vid}")
+                            st.markdown(f"**Time Window:** {t0s} → {t1s}")
+                            st.markdown(f"**Total Score:** {r['total']:.3f}")
+                            
+                            # Use the actual video ID from dataset (not from YouTube URL)
+                            start_sec = int(max(0, win['t0']))
+                            actual_video_id = vid  # Use the dataset video ID (e.g., K16_V013)
+                            youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
+                            
+                            # Get actual FPS from CSV file using dataset video ID
+                            actual_fps = get_fps_from_csv(actual_video_id)
+                            
+                            # Use the working YouTube API with FPS-based frame calculation
+                            components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps), height=700)
+                    else:
+                        st.markdown("No video URL available")
+                    st.divider()
+        # Ensure rerank section is empty when disabled
+        rerank_results_container.empty()
+
+    # 2) Transcript rerank (only if enabled)
+    if rerank_enabled:
+        # Do not render initial CLIP grid; proceed directly to reranked results
+        clip_results_container.empty()
+        # Add rerank start message to logs
+        def update_log():
+            with log_container.container():
+                st.text(gemini_log)
+                st.markdown(_aspects_header)
+                st.text(print_msg)
+                st.text(buf2.getvalue() if buf2 else "")
+                st.text("Running rerank_with_transcript_ultra_window() ...")
+        
+        update_log()
+        (reranked_df, buf3) = run_with_logs(
+            rerank_with_transcript_ultra_window,
+            results, query_vi, SEEDS,
+            60, DELTA_SEC,
+            0.6, 0.4,
+            {"any": 0.5, "phr": 0.5}, True, True,
+            workers=8, phrases_only=False, max_unigrams=16, max_phrases=10
+        )
+        if reranked_df is None or isinstance(reranked_df, tuple):
+            st.error("Rerank failed. See logs.")
+            st.stop()
+        # Add final rerank results to logs
+        def update_log():
+            with log_container.container():
+                st.text(gemini_log)
+                st.markdown(_aspects_header)
+                st.text(print_msg)
+                st.text(buf2.getvalue() if buf2 else "")
+                st.text("Running rerank_with_transcript_ultra_window() ...")
+                st.text(buf3.getvalue() if buf3 else "")
+        
+        update_log()
+        # Show a pretty table for the rerank head inside the Logs expander
+        with log_exp:
+            try:
+                _tbl = reranked_df.head(10).copy()
+                _tbl["t0"] = [sec_to_mmss(t) for t in _tbl["t0"].values]
+                _tbl["t1"] = [sec_to_mmss(t) for t in _tbl["t1"].values]
+                _show_cols = ["video_id","clip_total","hits_any","hits_phr","clip_n","text_score","fused","t0","t1"]
+                st.dataframe(_tbl[_show_cols].reset_index(drop=True), use_container_width=True)
+            except Exception:
+                pass
+
+        top_after = reorder_results_by_df(results, reranked_df, top_videos=TOP_VIDEOS)
+
+        # Row 8: Show reranked results
+        with rerank_results_container.container():
+            st.subheader("CLIP Multi-Aspects + Rerank with Transcript")
+            if reranked_df.empty:
+                st.info("No candidates for rerank.")
+            else:
+                rows = min(TOP_VIDEOS, len(top_after))
+                for i in range(rows):
+                    r = top_after[i]
+                    vid, win = r["video_id"], r["win"]
+                    t0s, t1s = sec_to_mmss(win['t0']), sec_to_mmss(win['t1'])
+                    with st.container():
+                        st.markdown(f"**[{i+1}] {vid}** · total={r['total']:.3f} · win: {t0s} → {t1s}")
+                        cols = st.columns(len(aspect_names))
+                        for j, col in enumerate(cols):
+                            with col:
+                                frame = int(win["aspect_frames"][j])
+                                score = float(win["aspect_scores"][j])
+                                img = safe_imread(keyframe_path(vid, frame))
+                                st.image(img, caption="")
+                                st.markdown(f"**{aspect_names[j]}**")
+                                st.markdown(f"frame={frame} s={score:.3f}")
+                    url = get_watch_url(vid)
+                    if url:
+                        # Watch Video button with popover
+                        with st.popover("🎥 Watch Video", use_container_width=True):
+                            st.markdown(f"**Video:** {vid}")
+                            st.markdown(f"**Time Window:** {t0s} → {t1s}")
+                            st.markdown(f"**Total Score:** {r['total']:.3f}")
+                            
+                            # Use the actual video ID from dataset (not from YouTube URL)
+                            start_sec = int(max(0, win['t0']))
+                            actual_video_id = vid  # Use the dataset video ID (e.g., K16_V013)
+                            youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
+                            
+                            # Get actual FPS from CSV file using dataset video ID
+                            actual_fps = get_fps_from_csv(actual_video_id)
+                            
+                            # Use the working YouTube API with FPS-based frame calculation
+                            components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps), height=700)
+                    else:
+                        st.markdown("No video URL available")
+                    st.divider()
+

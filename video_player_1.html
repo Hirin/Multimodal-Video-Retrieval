@@ -1,0 +1,190 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video Player 1</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 10px; 
+            background: #1a1a1a; 
+            color: white; 
+        }
+        .container { 
+            display: flex; 
+            gap: 15px; 
+            height: 100vh; 
+        }
+        .time-panel { 
+            flex: 1; 
+            background: #2e2e2e; 
+            padding: 15px; 
+            border-radius: 8px; 
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        }
+        .video-panel { 
+            flex: 2; 
+        }
+        .time-display { 
+            font-size: 28px; 
+            color: #00ff00; 
+            margin: 15px 0; 
+            text-align: center;
+        }
+        iframe { 
+            width: 100%; 
+            height: 100%; 
+            border-radius: 8px;
+        }
+        .status { 
+            margin: 10px 0; 
+            text-align: center;
+        }
+        .controls {
+            margin-top: 20px;
+            text-align: center;
+        }
+        button {
+            background: #d32f2f;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            margin: 5px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #b71c1c;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="time-panel">
+            <h3 style="text-align: center; margin-top: 0;">Current Time</h3>
+            <div class="time-display" id="current-time">833.0s</div>
+            <div class="status">
+                <p><strong>Start:</strong> 833.0s</p>
+                <p><strong>Status:</strong> <span id="status">Loading...</span></p>
+                <p><strong>State:</strong> <span id="player-state">Unknown</span></p>
+            </div>
+            
+            <div class="controls">
+                <button onclick="testAPI()">Test API</button>
+                <button onclick="toggleUpdates()">Toggle Updates</button>
+            </div>
+        </div>
+        
+        <div class="video-panel">
+            <iframe id="ytplayer" 
+                    src="https://www.youtube.com/embed/Rzpw5WR7nAY?start=833&enablejsapi=1"
+                    frameborder="0" 
+                    allowfullscreen>
+            </iframe>
+        </div>
+    </div>
+
+    <script>
+        var player;
+        var timeUpdateInterval;
+        var updatesEnabled = true;
+        
+        // Load YouTube API
+        var tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        var firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+        
+        function onYouTubeIframeAPIReady() {
+            console.log('YouTube API ready, initializing player 1');
+            player = new YT.Player('ytplayer', {
+                events: {
+                    'onReady': onPlayerReady,
+                    'onStateChange': onPlayerStateChange
+                }
+            });
+        }
+        
+        function onPlayerReady(event) {
+            console.log('Player 1 ready, starting time updates');
+            document.getElementById('status').textContent = 'Ready';
+            startTimeUpdates();
+        }
+        
+        function onPlayerStateChange(event) {
+            var stateNames = {
+                0: 'Ended',
+                1: 'Playing', 
+                2: 'Paused',
+                3: 'Buffering',
+                5: 'Cued'
+            };
+            var stateName = stateNames[event.data] || 'Unknown';
+            console.log('Player 1 state changed to:', event.data, stateName);
+            document.getElementById('player-state').textContent = stateName;
+            updateTime();
+        }
+        
+        function startTimeUpdates() {
+            if (timeUpdateInterval) {
+                clearInterval(timeUpdateInterval);
+            }
+            
+            timeUpdateInterval = setInterval(function() {
+                if (updatesEnabled) {
+                    updateTime();
+                }
+            }, 200);
+        }
+        
+        function updateTime() {
+            if (player && typeof player.getCurrentTime === 'function') {
+                try {
+                    var currentTime = player.getCurrentTime();
+                    console.log('Player 1 current time:', currentTime);
+                    
+                    var timeEl = document.getElementById('current-time');
+                    if (timeEl && currentTime !== undefined) {
+                        timeEl.textContent = currentTime.toFixed(1) + 's';
+                    }
+                } catch (e) {
+                    console.log('Error getting current time for player 1:', e);
+                }
+            }
+        }
+        
+        function testAPI() {
+            if (player) {
+                try {
+                    var time = player.getCurrentTime();
+                    var state = player.getPlayerState();
+                    var duration = player.getDuration();
+                    console.log('API Test - Time:', time, 'State:', state, 'Duration:', duration);
+                    alert(`API Test:\nTime: ${time}s\nState: ${state}\nDuration: ${duration}s`);
+                } catch (e) {
+                    console.log('API Test Error:', e);
+                    alert('API Test Error: ' + e.message);
+                }
+            } else {
+                alert('Player not ready');
+            }
+        }
+        
+        function toggleUpdates() {
+            updatesEnabled = !updatesEnabled;
+            console.log('Updates enabled:', updatesEnabled);
+        }
+        
+        // Fallback initialization
+        setTimeout(function() {
+            if (!player && typeof YT !== 'undefined' && YT.Player) {
+                console.log('Fallback initialization for player 1');
+                onYouTubeIframeAPIReady();
+            }
+        }, 2000);
+    </script>
+</body>
+</html>
