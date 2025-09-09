@@ -15,7 +15,24 @@ DATA_ROOT=E:/HCMC-AI/
 GOOGLE_API_KEY=your_api_key_here
 ```
 
-### 2. Cấu trúc thư mục dữ liệu
+### 2. Cài đặt dependencies
+
+Sau khi tạo virtual environment:
+
+```bash
+# Install all required packages
+pip install -r requirements.txt
+
+# Hoặc cài đặt từng package riêng lẻ
+pip install streamlit numpy pandas Pillow deep-translator torch torchvision
+pip install open-clip-torch clip-by-openai google-genai
+```
+
+**Lưu ý:** Một số packages có thể cần cài đặt bổ sung tùy thuộc vào hệ thống:
+- **torch/torchvision**: Có thể cần CUDA version nếu có GPU NVIDIA
+- **google-genai**: Cần Google API key để sử dụng Gemini features
+
+### 4. Cấu trúc thư mục dữ liệu
 
 Đảm bảo thư mục `E:/HCMC-AI/` có cấu trúc như sau:
 
@@ -39,7 +56,7 @@ E:/HCMC-AI/
     └── media-info/
 ```
 
-### 3. Tính năng chính
+### 5. Tính năng chính
 
 Ứng dụng hỗ trợ **2 chế độ tìm kiếm** với **bộ lọc nâng cao**:
 
@@ -96,7 +113,7 @@ E:/HCMC-AI/
 - `trượt ván trên cát` - Tìm videos về trượt ván trên cát
 - `lễ hội điêu khắc` - Tìm videos về lễ hội điêu khắc
 
-### 4. Chạy ứng dụng
+### 6. Chạy ứng dụng
 
 #### Cách 1: Sử dụng Batch Script (khuyến nghị)
 ```bash
@@ -109,20 +126,20 @@ cd E:\HCMC-AI-Competition
 python -m streamlit run streamlit_app.py --server.port 8501 --server.headless true
 ```
 
-### 5. Các thay đổi đã thực hiện để hỗ trợ Cross-Platform
+### 7. Các thay đổi đã thực hiện để hỗ trợ Cross-Platform
 
 1. **Biến môi trường**: Đã thay đổi từ `HCMC_DATA_ROOT` thành `DATA_ROOT`
 2. **Path động**: Thay thế tất cả path hardcoded bằng path dựa trên `DATA_ROOT`
 3. **Pathlib**: Sử dụng `pathlib.Path` để xử lý path cross-platform
 4. **Forward slashes**: Sử dụng forward slashes trong path để tương thích với cả Windows và Linux
 
-### 6. Lưu ý quan trọng
+### 8. Lưu ý quan trọng
 
 - **Path format**: Luôn sử dụng forward slashes (/) trong file .env, không sử dụng backslashes (\)
 - **DATA_ROOT**: Phải kết thúc bằng dấu /
 - **File encoding**: Đảm bảo file .env được lưu với encoding UTF-8 (không BOM)
 
-### 6. Troubleshooting
+### 9. Troubleshooting
 
 Nếu gặp lỗi path:
 1. Kiểm tra file `.env` có tồn tại và có nội dung chính xác
@@ -133,7 +150,7 @@ Nếu gặp lỗi path:
    print(os.environ.get('DATA_ROOT'))
    ```
 
-### 7. Migration từ Linux sang Windows
+### 10. Migration từ Linux sang Windows
 
 Nếu bạn di chuyển từ Linux sang Windows:
 
@@ -142,7 +159,7 @@ Nếu bạn di chuyển từ Linux sang Windows:
 3. Đảm bảo sử dụng forward slashes thay vì backslashes
 4. Kiểm tra lại cấu trúc thư mục dữ liệu
 
-### 8. Gemini API Configuration (Tùy chọn)
+### 11. Gemini API Configuration (Tùy chọn)
 
 #### 🔑 **Thiết lập API Key**
 1. Truy cập [Google AI Studio](https://aistudio.google.com)
@@ -170,9 +187,10 @@ Nếu bạn di chuyển từ Linux sang Windows:
 - **Max Aspects**: Tăng cho query đa dạng, giảm cho query tập trung
 - **Temperature**: Giảm cho câu trả lời nhất quán, tăng cho sáng tạo
 
-### 9. Các file được tạo/cập nhật
+### 12. Các file được tạo/cập nhật
 
 - `streamlit_app.py`: Cập nhật để sử dụng `DATA_ROOT` và path động
 - `run_streamlit.bat`: Script chạy cho Windows
 - `env_config.txt`: Template cho file .env
+- `requirements.txt`: Danh sách dependencies Python cần thiết
 - `README_Windows.md`: Hướng dẫn này
