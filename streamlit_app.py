@@ -34,7 +34,7 @@ if os.path.exists('.env'):
         pass
 
 # ============================ DEFAULT CONFIG (as requested) ==============================
-DATA_ROOT = os.environ.get("HCMC_DATA_ROOT", "/mnt/shared/HCMC-AI/")
+DATA_ROOT = os.environ.get("DATA_ROOT", "/mnt/shared/HCMC-AI/")
 DEFAULT_TOP_K = 10
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
@@ -752,8 +752,8 @@ def fallback_translate_and_create_aspects(query_vi: str) -> Tuple[List[Dict], Di
 def get_fps_from_csv(video_id: str) -> float:
     """Get FPS from map-keyframes CSV file"""
     csv_paths = [
-        f"/mnt/shared/HCMC-AI/b1/map-keyframes/{video_id}.csv",
-        f"/mnt/shared/HCMC-AI/b2/map-keyframes/{video_id}.csv",
+        f"{DATA_ROOT}b1/map-keyframes/{video_id}.csv",
+        f"{DATA_ROOT}b2/map-keyframes/{video_id}.csv",
     ]
     
     for csv_path in csv_paths:
@@ -774,8 +774,8 @@ def get_fps_from_csv(video_id: str) -> float:
 def get_watch_url(video_id: str) -> Optional[str]:
     # Try media-info directories for {video_id}.json with a 'watch_url' field
     media_info_dirs = [
-        "/mnt/shared/HCMC-AI/b1/media-info/",
-        "/mnt/shared/HCMC-AI/b2/media-info/",
+        f"{DATA_ROOT}b1/media-info/",
+        f"{DATA_ROOT}b2/media-info/",
     ]
     candidates = [Path(media_dir) / f"{video_id}.json" for media_dir in media_info_dirs]
     
