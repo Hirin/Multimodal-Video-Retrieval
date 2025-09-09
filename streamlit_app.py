@@ -35,7 +35,7 @@ if os.path.exists('.env'):
 
 # ============================ DEFAULT CONFIG (as requested) ==============================
 DATA_ROOT = os.environ.get("DATA_ROOT", "/mnt/shared/HCMC-AI/")
-DEFAULT_TOP_K = 10
+DEFAULT_TOP_K = 20
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 
 B1 = {
@@ -190,18 +190,38 @@ def timestamp_to_keyframe_number(vid: str, timestamp: float) -> int:
     return estimated_keyframe
 
 def find_best_keyframe(vid: str, target_frame: int) -> tuple:
-    """Find the best available keyframe closest to target_frame"""
+    """Find the best available keyframe closest to target_frame, using parquet data for filtering"""
+    # Get keyframes data from parquet
+    keyframes_data = get_keyframes_data()
+    dataset = "b1" if vid.startswith("L") else "b2"
+
     # Try frames in order of preference
     frame_offsets = [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -7, 7, -8, 8, -9, 9, -10, 10]
 
     for offset in frame_offsets:
         frame = target_frame + offset
         if frame >= 0:
-            img = safe_imread(keyframe_path(vid, frame))
-            if img is not None:  # Valid image exists
-                return img, frame
+            try:
+                # Check if this frame is in the canonical keyframes list
+                if dataset in keyframes_data:
+                    df = keyframes_data[dataset]
+                    # Filter by video_id and frame number
+                    matching_frames = df[(df['video_id'] == vid) & (df['n'] == frame)]
+                    if not matching_frames.empty:
+                        # Check if it's canonical (not duplicate)
+                        if dataset == 'b2':
+                            is_canonical = matching_frames['is_canonical'].iloc[0]
+                            if not is_canonical:
+                                continue  # Skip non-canonical frames
 
-    # If no frames found around target, try to find any available frame
+                img = safe_imread(keyframe_path(vid, frame))
+                if img is not None:  # Valid image exists
+                    return img, frame
+            except Exception as e:
+                print(f"[KEYFRAME] Error checking frame {frame} for {vid}: {e}")
+                continue
+
+    # If no frames found around target, try to find any available canonical frame
     # by scanning the keyframe directory
     D = B1 if dataset_for_video(vid) == "b1" else B2
     L, V = vid.split("_")
@@ -218,18 +238,45 @@ def find_best_keyframe(vid: str, target_frame: int) -> tuple:
             if image_files:
                 # Sort by frame number (extract number from filename)
                 def extract_frame_num(filepath):
-                    filename = filepath.stem
-                    # Extract number from filename (remove leading zeros)
-                    return int(filename.lstrip('0') or '0')
+                    try:
+                        filename = filepath.stem
+                        # Extract number from filename (remove leading zeros)
+                        return int(filename.lstrip('0') or '0')
+                    except (ValueError, AttributeError):
+                        return 0
 
                 image_files.sort(key=extract_frame_num)
 
-                # Try the frame closest to target_frame
+                # Filter by canonical keyframes from parquet data
+                canonical_frames = []
+                try:
+                    if dataset in keyframes_data:
+                        df = keyframes_data[dataset]
+                        video_frames = df[df['video_id'] == vid]
+
+                        if dataset == 'b1':
+                            # B1 uses all frames in keyframes_keepers
+                            canonical_frames = video_frames['n'].tolist() if 'n' in video_frames.columns else []
+                        else:
+                            # B2 uses only canonical frames
+                            if 'is_canonical' in video_frames.columns:
+                                canonical_frames = video_frames[video_frames['is_canonical'] == True]['n'].tolist()
+                            else:
+                                canonical_frames = video_frames['n'].tolist() if 'n' in video_frames.columns else []
+                except Exception as e:
+                    print(f"[KEYFRAME] Error filtering canonical frames: {e}")
+                    canonical_frames = []
+
+                # Try the frame closest to target_frame from canonical list
                 target_file = None
                 min_diff = float('inf')
 
                 for img_file in image_files:
                     frame_num = extract_frame_num(img_file)
+                    # Only consider canonical frames
+                    if canonical_frames and frame_num not in canonical_frames:
+                        continue
+
                     diff = abs(frame_num - target_frame)
                     if diff < min_diff:
                         min_diff = diff
@@ -241,12 +288,13 @@ def find_best_keyframe(vid: str, target_frame: int) -> tuple:
                         frame_num = extract_frame_num(target_file)
                         return img, frame_num
 
-                # If still no good image, try the last available frame
-                last_file = image_files[-1]
-                img = safe_imread(str(last_file))
-                if img is not None:
-                    frame_num = extract_frame_num(last_file)
-                    return img, frame_num
+                # If still no good image, try the last available canonical frame
+                for img_file in reversed(image_files):
+                    frame_num = extract_frame_num(img_file)
+                    if not canonical_frames or frame_num in canonical_frames:
+                        img = safe_imread(str(img_file))
+                        if img is not None:
+                            return img, frame_num
 
         except Exception as e:
             print(f"Error scanning keyframe directory {kf_dir}: {e}")
@@ -382,7 +430,7 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
         "Bạn là công cụ xây dựng truy vấn cho video retrieval.\n"
         "- Đầu vào: miêu tả TỰ NHIÊN (tiếng Việt/Anh).\n"
         "- Đầu ra: JSON với hai trường: 'aspects' và 'seeds'.\n"
-        f"  * aspects: mảng 1..{max_aspects} phần tử. Mỗi phần tử có name, prompts(2-4 EN), weight>0.\n"
+        f"  * aspects: mảng {max_aspects} phần tử. Mỗi phần tử có name, prompts(2-4 EN), weight>0.\n"
         "  * seeds: { 'unigrams': ≤28, 'phrases': ≤18 } bằng TIẾNG VIỆT.\n"
         "JSON hợp lệ, không kèm bình luận."
     )
@@ -413,9 +461,9 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
                 model=GEMINI_MODEL,
                 contents=json.dumps(payload, ensure_ascii=False),
                 config=cfg
-            )
+        )
             txt = getattr(resp, "text", None) or getattr(resp, "output_text", None)
-            if not txt:
+        if not txt:
                 raise RuntimeError("Empty text")
         data = json.loads(txt)
         if "aspects" not in data or not isinstance(data["aspects"], list):
@@ -580,6 +628,90 @@ def _alias_windows_and_dbpaths(windows):
     if g["b2"] and os.path.exists(B2_DB_PATH): out.append(("b2", B2_DB_PATH, g["b2"]))
     return out
 
+def highlight_keywords_in_text(text: str, query: str) -> str:
+    """Highlight keywords from BM25 query in the text"""
+    import re
+
+    # Type checking and conversion
+    if not isinstance(text, str):
+        text = str(text) if text is not None else ""
+    if not isinstance(query, str):
+        query = str(query) if query is not None else ""
+
+    # If either is empty, return original text
+    if not text or not query:
+        return text
+
+    try:
+        # Get keywords from the original query (before conversion)
+
+        # First, extract quoted phrases (e.g., "công an")
+        quoted_phrases = re.findall(r'"([^"]+)"', query)
+        quoted_phrases = [phrase.strip() for phrase in quoted_phrases if phrase.strip()]
+
+        # Remove quoted phrases from query for further processing
+        query_without_quotes = re.sub(r'"[^"]*"', '', query)
+
+        # Split by operators and clean up - keep single characters and numbers
+        keywords = re.split(r'\s*(?:AND|OR|NOT|\(|\))\s*', query_without_quotes)
+        keywords = [k.strip() for k in keywords if k.strip()]
+
+        # Also split by spaces and punctuation for individual words
+        words = re.findall(r'\b\w+\b', query_without_quotes.lower())
+
+        # Add numbers specifically (including single digits)
+        numbers = re.findall(r'\b\d+\b', query_without_quotes)
+
+        # Combine all keywords
+        all_keywords = quoted_phrases + keywords + words + numbers
+
+        # Remove duplicates while preserving order
+        all_keywords = list(dict.fromkeys(all_keywords))
+
+        # Allow all non-empty keywords
+        all_keywords = [k for k in all_keywords if k.strip()]
+
+        # Remove duplicates and sort by length (longest first) to avoid partial matches
+        all_keywords = list(dict.fromkeys(all_keywords))  # Remove duplicates while preserving order
+        all_keywords.sort(key=len, reverse=True)
+
+        # Create highlighted text
+        highlighted_text = text
+
+        for keyword in all_keywords:
+            # Create pattern based on keyword type
+            if keyword.isdigit():
+                # For numbers, use word boundaries but allow more flexible matching
+                pattern = re.compile(r'(?<![a-zA-Z])' + re.escape(keyword) + r'(?![a-zA-Z])(?![^<]*</b>)', re.IGNORECASE)
+            elif ' ' in keyword:
+                # For phrases, match the exact sequence with word boundaries
+                # Split the phrase and create a pattern that allows flexible whitespace
+                words = keyword.split()
+                if len(words) > 1:
+                    # Create pattern with flexible whitespace between words
+                    pattern_parts = [re.escape(word) for word in words]
+                    flexible_pattern = r'\s+'.join(pattern_parts)
+                    pattern = re.compile(r'\b' + flexible_pattern + r'\b(?![^<]*</b>)', re.IGNORECASE)
+                else:
+                    # Single word with space (shouldn't happen, but handle it)
+                    pattern = re.compile(r'\b' + re.escape(keyword) + r'\b(?![^<]*</b>)', re.IGNORECASE)
+            else:
+                # For single words, use word boundaries
+                pattern = re.compile(r'\b' + re.escape(keyword) + r'\b(?![^<]*</b>)', re.IGNORECASE)
+
+            # Replace all occurrences, preserving original case
+            def replace_func(match):
+                matched_text = match.group(0)
+                return f'<b>{matched_text}</b>'
+
+            highlighted_text = pattern.sub(replace_func, highlighted_text)
+
+        return highlighted_text
+
+    except Exception as e:
+        print(f"[HIGHLIGHT] Error highlighting text: {e}")
+        return text  # Return original text if highlighting fails
+
 def convert_bm25_syntax(query: str) -> str:
     """Convert user-friendly BM25 syntax to SQLite FTS5 syntax"""
     import re
@@ -599,6 +731,76 @@ def convert_bm25_syntax(query: str) -> str:
     query = re.sub(r'\s+', ' ', query).strip()
 
     return query
+
+def load_keyframes_data():
+    """Load keyframes data from parquet files for duplicate filtering"""
+    keyframes_data = {}
+
+    try:
+        import pandas as pd
+
+        # Load b1 keyframes keepers
+        b1_path = f"{DATA_ROOT}b1/keyframes_keepers.parquet"
+        if os.path.exists(b1_path):
+            try:
+                df_b1 = pd.read_parquet(b1_path)
+                # Ensure column names are strings
+                df_b1.columns = df_b1.columns.astype(str)
+                keyframes_data['b1'] = df_b1
+                print(f"[PARQUET] Loaded {len(df_b1)} keyframes for B1")
+            except Exception as e:
+                print(f"[PARQUET] Error loading B1 keyframes: {e}")
+
+        # Load b2 manifest dedup
+        b2_path = f"{DATA_ROOT}b2/manifest_dedup.parquet"
+        if os.path.exists(b2_path):
+            try:
+                df_b2 = pd.read_parquet(b2_path)
+                # Ensure column names are strings
+                df_b2.columns = df_b2.columns.astype(str)
+                # Filter only canonical keyframes (not duplicates)
+                if 'is_canonical' in df_b2.columns:
+                    df_b2_canonical = df_b2[df_b2['is_canonical'] == True]
+                else:
+                    df_b2_canonical = df_b2
+                keyframes_data['b2'] = df_b2_canonical
+                print(f"[PARQUET] Loaded {len(df_b2_canonical)} canonical keyframes for B2")
+            except Exception as e:
+                print(f"[PARQUET] Error loading B2 manifest: {e}")
+
+        # Also load duplicates for reference
+        dup_path = f"{DATA_ROOT}b1/duplicates.parquet"
+        if os.path.exists(dup_path):
+            try:
+                df_dup = pd.read_parquet(dup_path)
+                df_dup.columns = df_dup.columns.astype(str)
+                print(f"[PARQUET] Loaded {len(df_dup)} duplicate records")
+            except Exception as e:
+                print(f"[PARQUET] Error loading duplicates: {e}")
+
+        phash_path = f"{DATA_ROOT}b1/phash.parquet"
+        if os.path.exists(phash_path):
+            try:
+                df_phash = pd.read_parquet(phash_path)
+                df_phash.columns = df_phash.columns.astype(str)
+                print(f"[PARQUET] Loaded {len(df_phash)} perceptual hash records")
+            except Exception as e:
+                print(f"[PARQUET] Error loading phash: {e}")
+
+    except Exception as e:
+        print(f"[PARQUET] Error loading parquet data: {e}")
+
+    return keyframes_data
+
+# Global variable to cache keyframes data
+_KEYFRAMES_CACHE = None
+
+def get_keyframes_data():
+    """Get cached keyframes data"""
+    global _KEYFRAMES_CACHE
+    if _KEYFRAMES_CACHE is None:
+        _KEYFRAMES_CACHE = load_keyframes_data()
+    return _KEYFRAMES_CACHE
 
 def apply_search_filters(results, exclude_series_list=None, exclude_videos_list=None):
     """Apply filters to search results (both BM25 and CLIP)"""
@@ -628,16 +830,77 @@ def apply_search_filters(results, exclude_series_list=None, exclude_videos_list=
     print(f"[FILTER] Filtered {len(results)} -> {len(filtered_results)} results")
     return filtered_results
 
+def deduplicate_bm25_results(results, time_threshold=30.0):
+    """Remove duplicate results that are too close in time from the same video"""
+    if not results:
+        return results
+
+    # Group by video_id
+    video_groups = {}
+    for result in results:
+        video_id = result["video_id"]
+        if video_id not in video_groups:
+            video_groups[video_id] = []
+        video_groups[video_id].append(result)
+
+    deduplicated = []
+
+    for video_id, video_results in video_groups.items():
+        if len(video_results) <= 1:
+            # Only one result for this video, keep it
+            deduplicated.extend(video_results)
+            continue
+
+        # Sort by score (best first) and timestamp
+        video_results.sort(key=lambda x: (x["score"], x["timestamp"]))
+
+        # Keep the best result and filter others by time threshold
+        selected_results = [video_results[0]]  # Always keep the best result
+
+        for result in video_results[1:]:
+            # Check if this result is far enough from all selected results
+            too_close = False
+            for selected in selected_results:
+                time_diff = abs(result["timestamp"] - selected["timestamp"])
+                if time_diff < time_threshold:  # Within threshold (default 30 seconds)
+                    too_close = True
+                    break
+
+            if not too_close:
+                selected_results.append(result)
+
+        deduplicated.extend(selected_results)
+        print(f"[DEDUPE] Video {video_id}: {len(video_results)} -> {len(selected_results)} results")
+
+    # Sort final results by score
+    deduplicated.sort(key=lambda x: x["score"])
+
+    print(f"[DEDUPE] Total deduplicated: {len(results)} -> {len(deduplicated)} results")
+    return deduplicated
+
 def bm25_search_videos(query: str, limit: int = 50):
     """Search videos using BM25 full-text search"""
     import sqlite3
 
+    # Validate query
+    if not query or not query.strip():
+        print("[BM25] Empty query provided")
+        return []
+
     # Convert user-friendly syntax to SQLite FTS5 syntax
-    converted_query = convert_bm25_syntax(query)
+    converted_query = convert_bm25_syntax(query.strip())
     print(f"[BM25] Original query: '{query}'")
     print(f"[BM25] Converted query: '{converted_query}'")
 
+    # Check if converted query is valid
+    if not converted_query or not converted_query.strip():
+        print("[BM25] Converted query is empty")
+        return []
+
     results = []
+
+    # Store original query for highlighting
+    original_query = query
 
     # Search both databases
     for db_name, db_path in [("b1", B1_DB_PATH), ("b2", B2_DB_PATH)]:
@@ -645,35 +908,74 @@ def bm25_search_videos(query: str, limit: int = 50):
             print(f"[BM25] Database not found: {db_path}")
             continue
 
+        conn = None
+        cur = None
         try:
             conn = sqlite3.connect(db_path)
             cur = conn.cursor()
 
-            # BM25 search query with better highlighting
+            # BM25 search query - get full text from text column
+            # Note: In FTS5, both snippet() and bm25() use table name, not column name
             sql = """
-            SELECT video_id, snippet(docs, 2, '<mark>', '</mark>', '...', 100) as snippet,
-                   bm25(docs) as score, t
+            SELECT video_id,
+                   snippet(docs, 2, '<b>', '</b>', '...', 50) as snippet,
+                   text as full_text,
+                   bm25(docs) as score,
+                   t as timestamp
             FROM docs
-            WHERE docs MATCH ?
+            WHERE text MATCH ?
             ORDER BY bm25(docs) DESC
             LIMIT ?
             """
 
-            rows = cur.execute(sql, (converted_query, limit)).fetchall()
-            conn.close()
+            print(f"[BM25] Executing query for {db_name}: {converted_query}")
+            cur.execute(sql, (converted_query, limit))
+            rows = cur.fetchall()
+
+            print(f"[BM25] Found {len(rows)} results in {db_name}")
 
             for row in rows:
-                video_id, snippet, score, timestamp = row
+                video_id, snippet, full_text, score, timestamp = row
+
+                # Ensure all values are strings (SQLite might return integers for some fields)
+                video_id = str(video_id) if video_id is not None else ""
+                snippet = str(snippet) if snippet is not None else ""
+                full_text = str(full_text) if full_text is not None else ""
+                timestamp = float(timestamp) if timestamp is not None else 0.0
+
+                # Highlight keywords in full text
+                try:
+                    highlighted_full_text = highlight_keywords_in_text(full_text, original_query)
+                except Exception as e:
+                    print(f"[BM25] Error highlighting text for {video_id}: {e}")
+                    highlighted_full_text = full_text  # Use original text if highlighting fails
+
                 results.append({
                     "video_id": video_id,
                     "snippet": snippet,
-                    "score": score,
+                    "full_text": full_text,
+                    "highlighted_full_text": highlighted_full_text,
+                    "score": float(score) if score is not None else 0.0,
                     "timestamp": timestamp,
                     "db_source": db_name
                 })
 
         except Exception as e:
             print(f"[BM25] Error searching {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # Ensure connections are properly closed
+            try:
+                if cur:
+                    cur.close()
+            except Exception as e:
+                print(f"[BM25] Error closing cursor for {db_name}: {e}")
+            try:
+                if conn:
+                    conn.close()
+            except Exception as e:
+                print(f"[BM25] Error closing connection for {db_name}: {e}")
 
     # Sort by score and return top results
     results.sort(key=lambda x: x["score"], reverse=True)
@@ -992,7 +1294,7 @@ def get_fps_from_csv(video_id: str) -> float:
         f"{DATA_ROOT}b1/map-keyframes/{video_id}.csv",
         f"{DATA_ROOT}b2/map-keyframes/{video_id}.csv",
     ]
-    
+
     for csv_path in csv_paths:
         try:
             if os.path.exists(csv_path):
@@ -1004,7 +1306,7 @@ def get_fps_from_csv(video_id: str) -> float:
         except Exception as e:
             print(f"Error reading FPS from {csv_path}: {e}")
             continue
-    
+
     # Default FPS if not found
     return 25.0
 
@@ -1015,7 +1317,7 @@ def get_watch_url(video_id: str) -> Optional[str]:
         f"{DATA_ROOT}b2/media-info/",
     ]
     candidates = [Path(media_dir) / f"{video_id}.json" for media_dir in media_info_dirs]
-    
+
     for p in candidates:
         try:
             if p.exists():
@@ -1035,7 +1337,7 @@ st.title("HCMC AI 2025 – CLIP + BM25 Search")
 st.markdown("*Choose your search mode: **CLIP visual search** or **BM25 text search***")
 
 # Row 2: Filter options (collapsible)
-with st.expander("🔧 Search Filters", expanded=True):
+with st.expander("🔧 Search Filters", expanded=False):
     # Dataset selection
     col1, col2 = st.columns([1, 2])
 
@@ -1070,12 +1372,12 @@ with st.expander("🔧 Search Filters", expanded=True):
     exclude_videos_list = [v.strip() for v in exclude_videos.split(',') if v.strip()]
 
     # Apply dataset selection
-    if batch_label == "Batch 1":
-        DATASETS = {"b1"}
-    elif batch_label == "Batch 2":
-        DATASETS = {"b2"}
-    else:
-        DATASETS = {"b1", "b2"}
+if batch_label == "Batch 1":
+    DATASETS = {"b1"}
+elif batch_label == "Batch 2":
+    DATASETS = {"b2"}
+else:
+    DATASETS = {"b1", "b2"}
 
     # Show active filters summary
     active_filters = []
@@ -1157,7 +1459,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
                 try:
                     # Test with a simple prompt
                     test_prompt = "Hello! Please respond with 'API connection successful' if you can read this message."
-                    
+
                     # Import and test Gemini
                     import google.generativeai as genai
                     genai.configure(api_key=api_key)
@@ -1165,7 +1467,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
                     
                     response = model.generate_content(test_prompt)
                     response_text = response.text.strip()
-                    
+
                     if response_text:
                         st.success(f"✅ **Gemini API Test Successful!**")
                         st.info(f"**Response:** {response_text}")
@@ -1173,7 +1475,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
                     else:
                         st.warning("⚠️ **API responded but with empty content**")
                         st.markdown("The API connection works but returned no content.")
-                        
+
                 except Exception as e:
                     st.error(f"❌ **Gemini API Test Failed!**")
                     st.error(f"**Error:** {str(e)}")
@@ -1213,21 +1515,50 @@ if bm25_enabled:
     col_help = st.columns([1])[0]
 
     with col_help:
-        if st.button("📚 Query Syntax Help"):
-            st.info("""
-            **BM25 Query Syntax:**
+        with st.popover("📚 BM25 Query Syntax"):
+            st.markdown("""
+            ### 🔍 **BM25 Query Syntax**
 
-            **Operators:**
-            - `AND`: `từ1 AND từ2` - Both words required
-            - `OR`: `từ1 OR từ2` - At least one word
-            - `NOT`: `từ1 NOT từ2` - First word without second
-            - `"phrase"`: Exact phrase match
+            #### **SQL Operators:**
+            ```sql
+            -- Basic Operations
+            word1 AND word2    -- Both words required
+            word1 OR word2     -- At least one word
+            word1 NOT word2    -- First word without second
 
-            **Examples:**
-            - `cát AND điêu` - Videos with both words
-            - `cát OR biển` - Videos with either word
-            - `cát NOT biển` - Videos with "cát" but not "biển"
-            - `"điêu khắc cát"` - Exact phrase match
+            -- Shortcuts (same as above)
+            word1 & word2      -- Same as AND
+            word1 | word2      -- Same as OR
+
+            -- Exact Phrase Matching
+            "exact phrase"     -- Match exact sequence
+            ```
+
+            #### **📝 Examples:**
+            ```sql
+            -- Simple queries
+            cát AND điêu              -- Videos with both words
+            cát OR biển               -- Videos with either word
+            cát NOT biển              -- Videos with "cát" but not "biển"
+
+            -- Phrase queries
+            "điêu khắc cát"           -- Exact phrase match
+            "công an"                 -- Match "công an" as complete phrase
+
+            -- Complex queries
+            "cột đá" AND (10 OR 12)   -- Phrase + numbers
+            cát AND "điêu khắc" NOT biển  -- Mixed operators
+            ```
+
+            #### **⚡ Quick Reference:**
+            | Operator | SQL | Example | Description |
+            |----------|-----|---------|-------------|
+            | `AND` | `AND` | `cát AND điêu` | Both words required |
+            | `OR` | `OR` | `cát OR biển` | At least one word |
+            | `NOT` | `NOT` | `cát NOT biển` | First without second |
+            | `&` | `AND` | `cát & điêu` | Same as AND |
+            | `\|` | `OR` | `cát \| biển` | Same as OR |
+            | `"phrase"` | `"phrase"` | `"công an"` | Exact phrase match |
             """)
 
 
@@ -1238,7 +1569,7 @@ if bm25_enabled:
 • cát OR "điêu khắc" (tìm video có "cát" hoặc cụm "điêu khắc")
 • cát NOT biển (tìm video có "cát" nhưng không có "biển")
 
-Xem "BM25 Query Syntax Help" để biết thêm chi tiết."""
+Nhấn nút "📚 BM25 Query Syntax" để xem chi tiết syntax."""
 else:
     placeholder_text = "Nhập miêu tả truy vấn tiếng Việt / English ..."
 
@@ -1277,28 +1608,27 @@ st.markdown(
         border: 1px solid #ffeaa7 !important;
     }
 
-    .bm25-snippet {
+    .bm25-fulltext {
         line-height: 1.6 !important;
         margin: 8px 0 !important;
+        max-height: 200px !important;
+        overflow-y: auto !important;
+        padding: 10px !important;
+        background-color: #f8f9fa !important;
+        color: #212529 !important;
+        border: 1px solid #e9ecef !important;
+        border-radius: 5px !important;
+        font-size: 14px !important;
     }
 
-    .bm25-snippet mark {
+    .bm25-fulltext b, .bm25-fulltext strong {
         background-color: #fff3cd !important;
-        color: #856404 !important;
+        color: #212529 !important;
         font-weight: bold !important;
         padding: 2px 4px !important;
         border-radius: 3px !important;
         border: 1px solid #ffeaa7 !important;
-        margin: 0 1px !important;
-    }
-
-    .bm25-snippet b, .bm25-snippet strong {
-        background-color: #fff3cd !important;
-        color: #856404 !important;
-        font-weight: bold !important;
-        padding: 2px 4px !important;
-        border-radius: 3px !important;
-        border: 1px solid #ffeaa7 !important;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1) !important;
     }
     </style>
     """,
@@ -1413,6 +1743,9 @@ if run:
             # Apply search filters
             bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
 
+            # Remove duplicate results that are too close in time
+            bm25_results = deduplicate_bm25_results(bm25_results, time_threshold=30.0)
+
             # Highlight is always enabled for BM25 results
 
             with log_container.container():
@@ -1450,9 +1783,12 @@ if run:
                                 st.markdown(f"**[{i+1}] {vid}** · BM25 Score: {score:.3f}")
                                 st.markdown(f"**Timestamp:** {sec_to_mmss(timestamp)} | **Keyframe:** {actual_frame}")
                                 st.markdown(f"**Source:** {result['db_source'].upper()}")
+
+                                # Display highlighted full text
+                                highlighted_text = result.get("highlighted_full_text", snippet)
                                 st.markdown(f"""
-                                    <div class="bm25-snippet">
-                                        <strong>Snippet:</strong> {snippet}
+                                    <div class="bm25-fulltext">
+                                        <strong>Full Text:</strong> {highlighted_text}
                                     </div>
                                 """, unsafe_allow_html=True)
 
@@ -1464,9 +1800,12 @@ if run:
                                 st.markdown(f"**Timestamp:** {sec_to_mmss(timestamp)}")
                                 st.markdown(f"**Keyframe:** {actual_frame}")
                                 st.markdown(f"**BM25 Score:** {score:.3f}")
+
+                                # Display highlighted full text in video player
+                                highlighted_text = result.get("highlighted_full_text", snippet)
                                 st.markdown(f"""
-                                    <div class="bm25-snippet">
-                                        <strong>Context:</strong> {snippet}
+                                    <div class="bm25-fulltext">
+                                        <strong>Full Text:</strong> {highlighted_text}
                                     </div>
                                 """, unsafe_allow_html=True)
 
@@ -1516,7 +1855,7 @@ if run:
         aspects, seeds = fallback_translate_and_create_aspects(query_vi)
         spec = {"aspects": aspects, "seeds": seeds}
         gemini_log = "Using fallback translation method (Gemini API not configured)"
-    
+
     # Show Gemini call result first
     with log_container.container():
         st.text(gemini_log)
