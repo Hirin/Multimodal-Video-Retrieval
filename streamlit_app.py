@@ -54,8 +54,33 @@ B2 = {
     "keep_dir": f"{DATA_ROOT}b2/clip_keep_idxs",
 }
 
-B1_DB_PATH = f"{DATA_ROOT}b1/text_bm25.db"
-B2_DB_PATH = f"{DATA_ROOT}b2/text_bm25.db"
+# Find BM25 database paths
+def find_db_path(data_root, batch_name):
+    """Find the BM25 database path for a given batch"""
+    import glob
+
+    # Try common locations
+    possible_paths = [
+        f"{data_root}{batch_name}/text_bm25.db",
+        f"{data_root}{batch_name}/text_bm25.db",
+    ]
+
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+
+    # Search recursively for .db files
+    search_pattern = f"{data_root}{batch_name}/**/*.db"
+    db_files = glob.glob(search_pattern, recursive=True)
+    bm25_files = [f for f in db_files if 'bm25' in f.lower() or 'text' in f.lower()]
+
+    if bm25_files:
+        return bm25_files[0]
+
+    return None
+
+B1_DB_PATH = find_db_path(DATA_ROOT, "b1")
+B2_DB_PATH = find_db_path(DATA_ROOT, "b2")
 
 DATASETS = {"b1", "b2"}
 GEMINI_MODEL = "gemini-2.5-pro"
@@ -117,9 +142,122 @@ def keep_idxs_path_for_video(video_id: str) -> str:
 
 def safe_imread(path: str) -> Image.Image:
     try:
-        return Image.open(path).convert("RGB")
+        if os.path.exists(path):
+            return Image.open(path).convert("RGB")
+        else:
+            # Return None if file doesn't exist, don't return fallback
+            return None
     except Exception:
-        return Image.fromarray(np.full((360, 640, 3), 230, dtype=np.uint8))
+        return None
+
+def timestamp_to_keyframe_number(vid: str, timestamp: float) -> int:
+    """Convert timestamp to keyframe number using map-keyframes CSV"""
+    try:
+        # Try to read map-keyframes CSV for exact mapping
+        D = B1 if dataset_for_video(vid) == "b1" else B2
+        map_csv_path = f"{D['map_csv']}/{vid}.csv"
+
+        if os.path.exists(map_csv_path):
+            import pandas as pd
+            df = pd.read_csv(map_csv_path)
+
+            if 'pts_time' in df.columns and 'n' in df.columns:
+                # Find the keyframe with timestamp closest to the target
+                df['time_diff'] = abs(df['pts_time'] - timestamp)
+                closest_row = df.loc[df['time_diff'].idxmin()]
+
+                # Return the keyframe number (n column)
+                keyframe_num = int(closest_row['n'])
+                print(f"[Keyframe] Found exact mapping: timestamp {timestamp:.2f}s -> keyframe {keyframe_num}")
+                return keyframe_num
+
+    except Exception as e:
+        print(f"[Keyframe] Error reading map CSV for {vid}: {e}")
+
+    # Fallback: estimate based on typical keyframe extraction rate
+    fps = get_fps_from_csv(vid) or 25.0
+    estimated_frame = int(timestamp * fps)
+
+    # For batch 2, keyframes seem to be more frequent (every ~1-2 seconds)
+    if dataset_for_video(vid) == "b1":
+        keyframe_interval = 25  # ~1 second at 25fps
+    else:  # batch 2
+        keyframe_interval = 50  # More conservative for batch 2
+
+    estimated_keyframe = max(1, estimated_frame // keyframe_interval)
+    print(f"[Keyframe] Using estimation: timestamp {timestamp:.2f}s -> estimated keyframe {estimated_keyframe}")
+
+    return estimated_keyframe
+
+def find_best_keyframe(vid: str, target_frame: int) -> tuple:
+    """Find the best available keyframe closest to target_frame"""
+    # Try frames in order of preference
+    frame_offsets = [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -7, 7, -8, 8, -9, 9, -10, 10]
+
+    for offset in frame_offsets:
+        frame = target_frame + offset
+        if frame >= 0:
+            img = safe_imread(keyframe_path(vid, frame))
+            if img is not None:  # Valid image exists
+                return img, frame
+
+    # If no frames found around target, try to find any available frame
+    # by scanning the keyframe directory
+    D = B1 if dataset_for_video(vid) == "b1" else B2
+    L, V = vid.split("_")
+    kf_dir = f"{D['kf_root']}/{L}/{V}"
+
+    if os.path.exists(kf_dir):
+        try:
+            from pathlib import Path
+            # Get all image files in the directory
+            image_files = []
+            for ext in ['*.jpg', '*.jpeg', '*.png']:
+                image_files.extend(list(Path(kf_dir).glob(ext)))
+
+            if image_files:
+                # Sort by frame number (extract number from filename)
+                def extract_frame_num(filepath):
+                    filename = filepath.stem
+                    # Extract number from filename (remove leading zeros)
+                    return int(filename.lstrip('0') or '0')
+
+                image_files.sort(key=extract_frame_num)
+
+                # Try the frame closest to target_frame
+                target_file = None
+                min_diff = float('inf')
+
+                for img_file in image_files:
+                    frame_num = extract_frame_num(img_file)
+                    diff = abs(frame_num - target_frame)
+                    if diff < min_diff:
+                        min_diff = diff
+                        target_file = img_file
+
+                if target_file:
+                    img = safe_imread(str(target_file))
+                    if img is not None:
+                        frame_num = extract_frame_num(target_file)
+                        return img, frame_num
+
+                # If still no good image, try the last available frame
+                last_file = image_files[-1]
+                img = safe_imread(str(last_file))
+                if img is not None:
+                    frame_num = extract_frame_num(last_file)
+                    return img, frame_num
+
+        except Exception as e:
+            print(f"Error scanning keyframe directory {kf_dir}: {e}")
+
+    # Ultimate fallback - try frame 1
+    img = safe_imread(keyframe_path(vid, 1))
+    if img and img.size[0] > 100:
+        return img, 1
+
+    # Final fallback - return placeholder
+    return Image.fromarray(np.full((360, 640, 3), 200, dtype=np.uint8)), 1
 
 def list_videos_from_dirs(clip_dirs: List[str],
                           limit: Optional[int] = None,
@@ -235,7 +373,8 @@ FALLBACK = {
     }
 }
 
-def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.7, top_p: float = 0.9) -> Dict:
+def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.7, top_p: float = 0.9,
+                                         model: str = "gemini-2.5-pro", max_aspects: str = "N") -> Dict:
     if not (USE_LLM_ASPECTS and GEMINI_API_KEY):
         print("[Gemini] Using FALLBACK aspects/seeds (no API key)")
         return FALLBACK
@@ -243,7 +382,7 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
         "Bạn là công cụ xây dựng truy vấn cho video retrieval.\n"
         "- Đầu vào: miêu tả TỰ NHIÊN (tiếng Việt/Anh).\n"
         "- Đầu ra: JSON với hai trường: 'aspects' và 'seeds'.\n"
-        "  * aspects: mảng 1..N phần tử. Mỗi phần tử có name, prompts(2-4 EN), weight>0.\n"
+        f"  * aspects: mảng 1..{max_aspects} phần tử. Mỗi phần tử có name, prompts(2-4 EN), weight>0.\n"
         "  * seeds: { 'unigrams': ≤28, 'phrases': ≤18 } bằng TIẾNG VIỆT.\n"
         "JSON hợp lệ, không kèm bình luận."
     )
@@ -418,8 +557,7 @@ def build_keyword_sets(query_vi: str, seeds: Dict, max_unigrams=28, max_phrases=
     return uni, phr, q_any, q_phr
 
 def _connect_ro(db_path: str):
-    uri = f"file:{db_path}?immutable=1&mode=ro"
-    return sqlite3.connect(uri, uri=True, check_same_thread=False)
+    return sqlite3.connect(db_path, check_same_thread=False)
 
 def _count_one(db_path: str, vid: str, t0: float, t1: float, q_any: str | None, q_phr: str | None):
     conn = _connect_ro(db_path)
@@ -441,6 +579,105 @@ def _alias_windows_and_dbpaths(windows):
     if g["b1"] and os.path.exists(B1_DB_PATH): out.append(("b1", B1_DB_PATH, g["b1"]))
     if g["b2"] and os.path.exists(B2_DB_PATH): out.append(("b2", B2_DB_PATH, g["b2"]))
     return out
+
+def convert_bm25_syntax(query: str) -> str:
+    """Convert user-friendly BM25 syntax to SQLite FTS5 syntax"""
+    import re
+
+    # Replace operators
+    # & -> AND
+    query = re.sub(r'\s*&\s*', ' AND ', query)
+    # | -> OR
+    query = re.sub(r'\s*\|\s*', ' OR ', query)
+    # - -> NOT (but need to be careful with positioning)
+    query = re.sub(r'\s*-\s*', ' NOT ', query)
+
+    # Handle phrases in quotes - keep as is
+    # SQLite FTS5 supports "phrase search" directly
+
+    # Clean up extra spaces
+    query = re.sub(r'\s+', ' ', query).strip()
+
+    return query
+
+def apply_search_filters(results, exclude_series_list=None, exclude_videos_list=None):
+    """Apply filters to search results (both BM25 and CLIP)"""
+    if not exclude_series_list and not exclude_videos_list:
+        return results
+
+    filtered_results = []
+
+    for result in results:
+        video_id = result["video_id"]
+
+        # Check series exclusion
+        if exclude_series_list:
+            series_id = video_id.split('_')[0]  # Extract series (e.g., L01 from L01V001)
+            if series_id in exclude_series_list:
+                print(f"[FILTER] Excluded {video_id} (series {series_id})")
+                continue
+
+        # Check video exclusion
+        if exclude_videos_list and video_id in exclude_videos_list:
+            print(f"[FILTER] Excluded {video_id} (specific video)")
+            continue
+
+        # Keep the result if it passes all filters
+        filtered_results.append(result)
+
+    print(f"[FILTER] Filtered {len(results)} -> {len(filtered_results)} results")
+    return filtered_results
+
+def bm25_search_videos(query: str, limit: int = 50):
+    """Search videos using BM25 full-text search"""
+    import sqlite3
+
+    # Convert user-friendly syntax to SQLite FTS5 syntax
+    converted_query = convert_bm25_syntax(query)
+    print(f"[BM25] Original query: '{query}'")
+    print(f"[BM25] Converted query: '{converted_query}'")
+
+    results = []
+
+    # Search both databases
+    for db_name, db_path in [("b1", B1_DB_PATH), ("b2", B2_DB_PATH)]:
+        if not os.path.exists(db_path):
+            print(f"[BM25] Database not found: {db_path}")
+            continue
+
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+
+            # BM25 search query with better highlighting
+            sql = """
+            SELECT video_id, snippet(docs, 2, '<mark>', '</mark>', '...', 100) as snippet,
+                   bm25(docs) as score, t
+            FROM docs
+            WHERE docs MATCH ?
+            ORDER BY bm25(docs) DESC
+            LIMIT ?
+            """
+
+            rows = cur.execute(sql, (converted_query, limit)).fetchall()
+            conn.close()
+
+            for row in rows:
+                video_id, snippet, score, timestamp = row
+                results.append({
+                    "video_id": video_id,
+                    "snippet": snippet,
+                    "score": score,
+                    "timestamp": timestamp,
+                    "db_source": db_name
+                })
+
+        except Exception as e:
+            print(f"[BM25] Error searching {db_name}: {e}")
+
+    # Sort by score and return top results
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:limit]
 
 def rerank_with_transcript_ultra_window(
     clip_results: list,
@@ -791,20 +1028,68 @@ def get_watch_url(video_id: str) -> Optional[str]:
     return None
 
 # =============================== STREAMLIT UI ============================================
-st.set_page_config(page_title="HCMC AI 2025 – Multi-Aspect Search", layout="wide")
+st.set_page_config(page_title="HCMC AI 2025 – CLIP + BM25 Search", layout="wide")
 
 # Row 1: Title
-st.title("HCMC AI 2025 – Multi-Aspect Search (CLIP + Transcript Rerank)")
+st.title("HCMC AI 2025 – CLIP + BM25 Search")
+st.markdown("*Choose your search mode: **CLIP visual search** or **BM25 text search***")
 
-# Row 2: Batch selection (collapsible)
-with st.expander("Select Dataset Batch", expanded=False):
-    batch_label = st.selectbox("Dataset Batch:", ["Both Batches", "Batch 1", "Batch 2"], index=0)
-if batch_label == "Batch 1":
-    DATASETS = {"b1"}
-elif batch_label == "Batch 2":
-    DATASETS = {"b2"}
-else:
-    DATASETS = {"b1", "b2"}
+# Row 2: Filter options (collapsible)
+with st.expander("🔧 Search Filters", expanded=True):
+    # Dataset selection
+    col1, col2 = st.columns([1, 2])
+
+    with col1:
+        st.markdown("**Dataset Selection:**")
+        batch_label = st.selectbox("Choose Dataset:", ["Both Batches", "Batch 1", "Batch 2"], index=0)
+
+    with col2:
+        st.markdown("**Advanced Filters:**")
+
+    # Filter inputs
+    filter_col1, filter_col2 = st.columns(2)
+
+    with filter_col1:
+        exclude_series = st.text_input(
+            "❌ Exclude Series:",
+            placeholder="L01,L02,K01",
+            help="Exclude video series (comma-separated). E.g., L01,L02 to exclude batch 1 videos",
+            key="exclude_series"
+        )
+
+    with filter_col2:
+        exclude_videos = st.text_input(
+            "❌ Exclude Videos:",
+            placeholder="L01V001,L01V002",
+            help="Exclude specific videos by ID (comma-separated)",
+            key="exclude_videos"
+        )
+
+    # Parse filter inputs
+    exclude_series_list = [s.strip() for s in exclude_series.split(',') if s.strip()]
+    exclude_videos_list = [v.strip() for v in exclude_videos.split(',') if v.strip()]
+
+    # Apply dataset selection
+    if batch_label == "Batch 1":
+        DATASETS = {"b1"}
+    elif batch_label == "Batch 2":
+        DATASETS = {"b2"}
+    else:
+        DATASETS = {"b1", "b2"}
+
+    # Show active filters summary
+    active_filters = []
+    if batch_label != "Both Batches":
+        active_filters.append(f"Dataset: {batch_label}")
+    if exclude_series_list:
+        active_filters.append(f"Exclude {len(exclude_series_list)} series")
+    if exclude_videos_list:
+        active_filters.append(f"Exclude {len(exclude_videos_list)} videos")
+
+    if active_filters:
+        st.success(f"✅ **Active Filters:** {', '.join(active_filters)}")
+    else:
+        st.info("ℹ️ **No filters applied** - searching all available videos")
 
 # Row 2.5: Gemini API Configuration and Testing
 with st.expander("🔑 Gemini API Configuration", expanded=False):
@@ -827,7 +1112,18 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
 
     # Gemini Configuration Options (only show if API key is configured)
     if api_key and api_key.strip():
-        st.markdown("**Model Configuration:**")
+        st.markdown("**Model Selection:**")
+        col_model = st.columns([1])[0]
+
+        with col_model:
+            gemini_model = st.selectbox(
+                "Gemini Model:",
+                ["gemini-2.5-pro", "gemini-2.5-flash"],
+                index=0,
+                help="gemini-2.5-pro: High quality, gemini-2.5-flash: Fast speed"
+            )
+
+        st.markdown("**Generation Parameters:**")
         col_temp, col_topp = st.columns(2)
 
         with col_temp:
@@ -894,8 +1190,59 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
         st.warning("⚠️ **API Key Status:** Not configured")
 
 # Row 3: Query input
-rerank_enabled = st.checkbox("Search with Transcript Rerank", value=False)
-query_vi = st.text_area("Enter Query:", height=120, placeholder="Nhập miêu tả truy vấn tiếng Việt / English ...")
+col_max_aspects, col_rerank, col_bm25 = st.columns([1.2, 1, 1.2])
+
+with col_max_aspects:
+    max_aspects_input = st.text_input(
+        "🎯 Max aspects:",
+        value="",
+        placeholder="Không nhập thì ngẫu nhiên",
+        help="Số lượng aspects Gemini tạo (để trống = tự động)",
+        key="max_aspects_input"
+    )
+
+with col_rerank:
+    rerank_enabled = st.checkbox("Search with Transcript Rerank", value=False)
+
+with col_bm25:
+    bm25_enabled = st.checkbox("🔍 BM25 Keyword Search", value=False,
+                              help="Search directly in video transcripts using advanced BM25 syntax")
+
+# BM25 options when enabled
+if bm25_enabled:
+    col_help = st.columns([1])[0]
+
+    with col_help:
+        if st.button("📚 Query Syntax Help"):
+            st.info("""
+            **BM25 Query Syntax:**
+
+            **Operators:**
+            - `AND`: `từ1 AND từ2` - Both words required
+            - `OR`: `từ1 OR từ2` - At least one word
+            - `NOT`: `từ1 NOT từ2` - First word without second
+            - `"phrase"`: Exact phrase match
+
+            **Examples:**
+            - `cát AND điêu` - Videos with both words
+            - `cát OR biển` - Videos with either word
+            - `cát NOT biển` - Videos with "cát" but not "biển"
+            - `"điêu khắc cát"` - Exact phrase match
+            """)
+
+
+# Dynamic placeholder based on search mode
+if bm25_enabled:
+    placeholder_text = """Ví dụ BM25 queries:
+• cát AND điêu AND khắc (tìm video có cả 3 từ)
+• cát OR "điêu khắc" (tìm video có "cát" hoặc cụm "điêu khắc")
+• cát NOT biển (tìm video có "cát" nhưng không có "biển")
+
+Xem "BM25 Query Syntax Help" để biết thêm chi tiết."""
+else:
+    placeholder_text = "Nhập miêu tả truy vấn tiếng Việt / English ..."
+
+query_vi = st.text_area("Enter Query:", height=120, placeholder=placeholder_text)
 
 # Button styling for full width
 st.markdown(
@@ -918,6 +1265,40 @@ st.markdown(
     .main .block-container {
         padding-left: 1rem !important;
         padding-right: 1rem !important;
+    }
+
+    /* BM25 Highlight Styles */
+    .bm25-highlight {
+        background-color: #fff3cd !important;
+        color: #856404 !important;
+        font-weight: bold !important;
+        padding: 2px 4px !important;
+        border-radius: 3px !important;
+        border: 1px solid #ffeaa7 !important;
+    }
+
+    .bm25-snippet {
+        line-height: 1.6 !important;
+        margin: 8px 0 !important;
+    }
+
+    .bm25-snippet mark {
+        background-color: #fff3cd !important;
+        color: #856404 !important;
+        font-weight: bold !important;
+        padding: 2px 4px !important;
+        border-radius: 3px !important;
+        border: 1px solid #ffeaa7 !important;
+        margin: 0 1px !important;
+    }
+
+    .bm25-snippet b, .bm25-snippet strong {
+        background-color: #fff3cd !important;
+        color: #856404 !important;
+        font-weight: bold !important;
+        padding: 2px 4px !important;
+        border-radius: 3px !important;
+        border: 1px solid #ffeaa7 !important;
     }
     </style>
     """,
@@ -951,7 +1332,11 @@ if gemini_configured:
             else:
                 with st.spinner("Enhancing query with Gemini..."):
                     try:
-                        enhanced_data = extract_aspects_and_seeds_with_gemini(query_vi, gemini_temperature, gemini_top_p)
+                        enhanced_data = extract_aspects_and_seeds_with_gemini(
+                            query_vi, gemini_temperature, gemini_top_p,
+                            gemini_model if 'gemini_model' in locals() else "gemini-2.5-pro",
+                            max_aspects_input.strip() if max_aspects_input.strip() else "N"
+                        )
                         st.session_state.enhanced_data = enhanced_data
                         st.session_state.query_enhanced = True
                         st.success("✅ Query enhanced successfully!")
@@ -1016,6 +1401,96 @@ clip_results_container = st.empty()
 rerank_results_container = st.empty()
 
 if run:
+    # Check if BM25 search is enabled
+    if bm25_enabled:
+        # BM25 Keyword Search Mode
+        with log_container.container():
+            st.text("🔍 Running BM25 keyword search...")
+
+        try:
+            bm25_results = bm25_search_videos(query_vi, limit=TOP_VIDEOS)
+
+            # Apply search filters
+            bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
+
+            # Highlight is always enabled for BM25 results
+
+            with log_container.container():
+                st.text("🔍 Running BM25 keyword search...")
+                st.text(f"Found {len(bm25_results)} results")
+
+            if bm25_results:
+                # Display BM25 results
+                with clip_results_container.container():
+                    st.subheader("🔍 BM25 Keyword Search Results")
+
+                    for i, result in enumerate(bm25_results):
+                        vid = result["video_id"]
+                        score = result["score"]
+                        snippet = result["snippet"]
+                        timestamp = result["timestamp"]
+
+                        with st.container():
+                            # Header with keyframe
+                            col_img, col_info = st.columns([1, 3])
+
+                            with col_img:
+                                # Find keyframe closest to timestamp
+                                target_keyframe = timestamp_to_keyframe_number(vid, timestamp)
+                                keyframe_img, actual_frame = find_best_keyframe(vid, target_keyframe)
+
+                                if keyframe_img is not None and keyframe_img.size[0] > 100:
+                                    st.image(keyframe_img, caption=f"Keyframe {actual_frame}", use_container_width=True)
+                                else:
+                                    # Fallback image if keyframe not found
+                                    fallback_img = Image.fromarray(np.full((180, 320, 3), 200, dtype=np.uint8))
+                                    st.image(fallback_img, caption=f"No keyframe at ~{sec_to_mmss(timestamp)}", use_container_width=True)
+
+                            with col_info:
+                                st.markdown(f"**[{i+1}] {vid}** · BM25 Score: {score:.3f}")
+                                st.markdown(f"**Timestamp:** {sec_to_mmss(timestamp)} | **Keyframe:** {actual_frame}")
+                                st.markdown(f"**Source:** {result['db_source'].upper()}")
+                                st.markdown(f"""
+                                    <div class="bm25-snippet">
+                                        <strong>Snippet:</strong> {snippet}
+                                    </div>
+                                """, unsafe_allow_html=True)
+
+                        # Try to get watch URL and display video player
+                        url = get_watch_url(vid)
+                        if url:
+                            with st.popover("🎥 Watch Video", use_container_width=True):
+                                st.markdown(f"**Video:** {vid}")
+                                st.markdown(f"**Timestamp:** {sec_to_mmss(timestamp)}")
+                                st.markdown(f"**Keyframe:** {actual_frame}")
+                                st.markdown(f"**BM25 Score:** {score:.3f}")
+                                st.markdown(f"""
+                                    <div class="bm25-snippet">
+                                        <strong>Context:</strong> {snippet}
+                                    </div>
+                                """, unsafe_allow_html=True)
+
+                                actual_video_id = vid
+                                youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
+                                actual_fps = get_fps_from_csv(actual_video_id)
+                                # Use the original timestamp from BM25 results
+                                start_sec = int(max(0, timestamp))
+
+                                components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps), height=700)
+                        else:
+                            st.markdown("No video URL available")
+
+                        st.divider()
+            else:
+                st.warning("No BM25 search results found. Try different keywords or check if BM25 databases exist.")
+
+        except Exception as e:
+            st.error(f"BM25 search failed: {e}")
+            st.info("Make sure BM25 databases exist in the data directory")
+
+        # Don't continue with CLIP search when BM25 is enabled
+        st.stop()
+
     # Use enhanced data from session state or fallback translation
     if st.session_state.enhanced_data:
         spec = st.session_state.enhanced_data
@@ -1024,7 +1499,12 @@ if run:
         # Fallback if no enhanced data but Gemini is configured
         with log_container.container():
             st.text("Running extract_aspects_and_seeds_with_gemini() ...")
-        (spec, buf) = run_with_logs(extract_aspects_and_seeds_with_gemini, query_vi, gemini_temperature, gemini_top_p)
+        (spec, buf) = run_with_logs(
+            extract_aspects_and_seeds_with_gemini,
+            query_vi, gemini_temperature, gemini_top_p,
+            gemini_model if 'gemini_model' in locals() else "gemini-2.5-pro",
+            max_aspects_input.strip() if max_aspects_input.strip() else "N"
+        )
         if spec is None:
             st.error("Failed to extract aspects/seeds. See logs.")
             st.stop()
@@ -1099,6 +1579,10 @@ if run:
         st.error("Ranking failed. See logs.")
         st.stop()
     (results, aspect_names, aspect_weights) = rank_out
+
+    # Apply search filters to CLIP results
+    results = apply_search_filters(results, exclude_series_list, exclude_videos_list)
+
     # Add CLIP rank results to logs
     def update_log():
         with log_container.container():
