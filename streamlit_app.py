@@ -23,13 +23,13 @@ if os.path.exists('.env'):
     try:
         with open('.env', 'r', encoding='utf-8') as f:
             for line in f:
-                line = line.strip()
-                if not line or line.startswith('#') or '=' not in line:
-                    continue
-                k, v = line.split('=', 1)
-                k = k.strip(); v = v.strip().strip('"').strip("'")
-                if k and k not in os.environ:
-                    os.environ[k] = v
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    k, v = line.split('=', 1)
+                    k = k.strip(); v = v.strip().strip('"').strip("'")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
     except Exception:
         pass
 
@@ -425,12 +425,12 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
                                          model: str = "gemini-2.5-pro", max_aspects: str = "N") -> Dict:
     if not (USE_LLM_ASPECTS and GEMINI_API_KEY):
         print("[Gemini] Using FALLBACK aspects/seeds (no API key)")
-        return FALLBACK
+        return {"aspects": FALLBACK.get("aspects", []), "seeds": FALLBACK.get("seeds", {}), "source": "fallback", "error": "no_api_key"}
     sys_inst = (
         "Bạn là công cụ xây dựng truy vấn cho video retrieval.\n"
         "- Đầu vào: miêu tả TỰ NHIÊN (tiếng Việt/Anh).\n"
         "- Đầu ra: JSON với hai trường: 'aspects' và 'seeds'.\n"
-        f"  * aspects: mảng {max_aspects} phần tử. Mỗi phần tử có name, prompts(2-4 EN), weight>0.\n"
+        f"  * aspects: mảng {max_aspects} phần tử. Mỗi phần tử có name(VI), prompts(2-4 EN), weight>0(Tự đánh giá).\n"
         "  * seeds: { 'unigrams': ≤28, 'phrases': ≤18 } bằng TIẾNG VIỆT.\n"
         "JSON hợp lệ, không kèm bình luận."
     )
@@ -440,7 +440,7 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
         client = genai.Client(api_key=GEMINI_API_KEY)
         try:
             resp = client.responses.generate(
-                model=GEMINI_MODEL,
+            model=GEMINI_MODEL,
                 input=json.dumps(payload, ensure_ascii=False),
                 system_instruction=sys_inst,
                 config={"max_output_tokens": GEMINI_MAX_TOKENS,
@@ -470,12 +470,13 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
             raise ValueError("no aspects")
         if "seeds" not in data or not isinstance(data["seeds"], dict):
             data["seeds"] = {"unigrams": [], "phrases": []}
+        data["source"] = "gemini"
         return data
     except Exception as e:
         print(f"[Gemini] Call failed: {e}")
         print("[Gemini] Using fallback translation method...")
         aspects, seeds = fallback_translate_and_create_aspects(query_vi)
-        return {"aspects": aspects, "seeds": seeds}
+        return {"aspects": aspects, "seeds": seeds, "source": "fallback", "error": str(e)}
 
 # =============================== BUILD QUERY VECTORS ====================================
 
@@ -1492,7 +1493,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
         st.warning("⚠️ **API Key Status:** Not configured")
 
 # Row 3: Query input
-col_max_aspects, col_rerank, col_bm25 = st.columns([1.2, 1, 1.2])
+col_max_aspects, col_mode = st.columns([1.2, 2])
 
 with col_max_aspects:
     max_aspects_input = st.text_input(
@@ -1503,12 +1504,37 @@ with col_max_aspects:
         key="max_aspects_input"
     )
 
-with col_rerank:
-    rerank_enabled = st.checkbox("Search with Transcript Rerank", value=False)
+with col_mode:
+    search_mode = st.selectbox(
+        "🔎 Search Mode",
+        [
+            "CLIP Multi-aspects Search",
+            "CLIP Multi-aspects Search + Rerank",
+            "BM25 Keyword Search",
+        ],
+        index=0,
+    )
 
-with col_bm25:
-    bm25_enabled = st.checkbox("🔍 BM25 Keyword Search", value=False,
-                              help="Search directly in video transcripts using advanced BM25 syntax")
+# Derive mode flags from selection
+rerank_enabled = (search_mode == "CLIP Multi-aspects Search + Rerank")
+bm25_enabled = (search_mode == "BM25 Keyword Search")
+
+# Gemini availability toggle (placed below Max aspects and above query input)
+gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
+turn_off_gemini = st.checkbox(
+    "🔌 Turn off Gemini",
+    value=False,
+    key="turn_off_gemini",
+    help="Disable Gemini API to skip Enhance step. Rerank requires Gemini and will be disabled."
+)
+gemini_available = gemini_configured and not turn_off_gemini
+
+# If Gemini is not available, prevent selecting rerank mode
+if (not gemini_available) and rerank_enabled:
+    st.warning("⚠️ Rerank requires Gemini. Switching to basic CLIP search.")
+    search_mode = "CLIP Multi-aspects Search"
+    rerank_enabled = False
+    bm25_enabled = (search_mode == "BM25 Keyword Search")
 
 # BM25 options when enabled
 if bm25_enabled:
@@ -1641,18 +1667,33 @@ if 'query_enhanced' not in st.session_state:
 if 'enhanced_data' not in st.session_state:
     st.session_state.enhanced_data = None
 
-# Row 4: Query buttons - Conditional display based on Gemini API status
+# Row 4: Query buttons - Conditional display based on search mode
 run = False  # Initialize run variable
 
 # Check if Gemini API is configured
 gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
+gemini_available = 'turn_off_gemini' in st.session_state and gemini_configured and (not st.session_state['turn_off_gemini'])
+
+# Auto-run once after first enhance (so buttons switch to Run/Reset immediately)
+if st.session_state.get('auto_run_after_enhance', False):
+    run = True
+    st.session_state['auto_run_after_enhance'] = False
 
 # Default values for Gemini parameters (when API is not configured)
 gemini_temperature = 0.7
 gemini_top_p = 0.9
 
-if gemini_configured:
-    # Gemini is configured - show Enhance Query first, then Run Query
+if bm25_enabled:
+    # BM25 mode - always show Run Query directly (no enhancement needed)
+    run_button = st.button("🚀 Run Query", use_container_width=True, type="primary")
+    if run_button:
+        if not query_vi.strip():
+            st.error("Please enter a query first!")
+        else:
+            run = True
+            st.info("🔍 **BM25 Keyword Search** - Searching directly by keywords")
+elif gemini_available:
+    # CLIP mode with Gemini - show Enhance Query first, then Run Query
     if not st.session_state.query_enhanced:
         # Show Enhance Query button (Green, full width)
         enhance_button = st.button("🌱 Enhance Query", use_container_width=True, type="primary")
@@ -1669,23 +1710,28 @@ if gemini_configured:
                         )
                         st.session_state.enhanced_data = enhanced_data
                         st.session_state.query_enhanced = True
-                        st.success("✅ Query enhanced successfully!")
+                        st.success("✅ Query enhanced successfully! Running search...")
+                        # Trigger a rerun where Run/Reset buttons show and auto-run executes once
+                        st.session_state['auto_run_after_enhance'] = True
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to enhance query: {e}")
     else:
-        # Show Run Query button (Red, full width) after enhancement
-        run_button = st.button("🚀 Run Query", use_container_width=True, type="secondary")
+        # After enhancement: show Run and Reset so user can reuse aspects/seeds for rerank later
+        cols_rr = st.columns([1, 1])
+        with cols_rr[0]:
+            run_button = st.button("🚀 Run Query", use_container_width=True, type="secondary")
+        with cols_rr[1]:
+            reset_button = st.button("🔄 Reset Query", use_container_width=True)
+
         if run_button:
             run = True
-
-        # Reset button
-        if st.button("🔄 Reset Query", help="Clear enhanced query and start over"):
+        if reset_button:
             st.session_state.query_enhanced = False
             st.session_state.enhanced_data = None
             st.rerun()
 else:
-    # Gemini not configured - show Run Query directly with fallback
+    # CLIP mode without Gemini - show Run Query directly with fallback
     run_button = st.button("🚀 Run Query", use_container_width=True, type="primary")
     if run_button:
         if not query_vi.strip():
@@ -1738,13 +1784,14 @@ if run:
             st.text("🔍 Running BM25 keyword search...")
 
         try:
-            bm25_results = bm25_search_videos(query_vi, limit=TOP_VIDEOS)
+            with st.spinner("🔎 Đang search BM25..."):
+                bm25_results = bm25_search_videos(query_vi, limit=TOP_VIDEOS)
 
-            # Apply search filters
-            bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
+                # Apply search filters
+                bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
 
-            # Remove duplicate results that are too close in time
-            bm25_results = deduplicate_bm25_results(bm25_results, time_threshold=30.0)
+                # Remove duplicate results that are too close in time
+                bm25_results = deduplicate_bm25_results(bm25_results, time_threshold=30.0)
 
             # Highlight is always enabled for BM25 results
 
@@ -1830,12 +1877,16 @@ if run:
         # Don't continue with CLIP search when BM25 is enabled
         st.stop()
 
-    # Use enhanced data from session state or fallback translation
+    # Prefer cached enhanced data if available
     if st.session_state.enhanced_data:
         spec = st.session_state.enhanced_data
-        gemini_log = "Query enhanced successfully with Gemini API"
-    elif gemini_configured:
-        # Fallback if no enhanced data but Gemini is configured
+        if spec.get("source") == "gemini":
+            gemini_log = "Query enhanced successfully with Gemini API (cached)"
+        else:
+            err = spec.get("error", "")
+            gemini_log = f"Query enhance failed — using fallback translation (cached){' | error: ' + err if err else ''}"
+    elif gemini_available:
+        # No cached enhancement; call Gemini normally
         with log_container.container():
             st.text("Running extract_aspects_and_seeds_with_gemini() ...")
         (spec, buf) = run_with_logs(
@@ -1847,14 +1898,21 @@ if run:
         if spec is None:
             st.error("Failed to extract aspects/seeds. See logs.")
             st.stop()
-        gemini_log = buf.getvalue() if buf else ""
+        if spec.get("source") == "gemini":
+            gemini_log = "Query enhanced successfully with Gemini API"
+        else:
+            err = spec.get("error", "")
+            gemini_log = f"Query enhance failed — using fallback translation{' | error: ' + err if err else ''}"
     else:
-        # Gemini not configured - use fallback translation directly
+        # Gemini is turned off or not available: force fallback
+        if rerank_enabled:
+            st.warning("⚠️ Rerank not available when Gemini is turned off. Running basic CLIP search.")
+            rerank_enabled = False
         with log_container.container():
             st.text("Using fallback translation method...")
         aspects, seeds = fallback_translate_and_create_aspects(query_vi)
         spec = {"aspects": aspects, "seeds": seeds}
-        gemini_log = "Using fallback translation method (Gemini API not configured)"
+        gemini_log = "Using fallback translation method (Gemini off or not configured)"
 
     # Show Gemini call result first
     with log_container.container():
@@ -1901,19 +1959,20 @@ if run:
     if "b1" in DATASETS: clip_dirs.append(B1["clip_dir"])  # for visibility in logs
     if "b2" in DATASETS: clip_dirs.append(B2["clip_dir"])  # for visibility in logs
     print_msg = f"[Rank] DATASETS={DATASETS} | clip_dirs={clip_dirs} | window={WINDOW_SEC}s | skip={SKIP_SEC}s"
-    (rank_out, buf2) = run_with_logs(
-        rank_videos_clip_window,
-        ASPECTS,
-        LIMIT_VIDEOS,
-        WINDOW_SEC,
-        SKIP_SEC,
-        None,
-        EXCLUDE_SER,
-        None,
-        None,
-        None,
-        None,
-    )
+    with st.spinner("🎬 Đang chạy CLIP search..."):
+        (rank_out, buf2) = run_with_logs(
+            rank_videos_clip_window,
+            ASPECTS,
+            LIMIT_VIDEOS,
+            WINDOW_SEC,
+            SKIP_SEC,
+            None,
+            EXCLUDE_SER,
+            None,
+            None,
+            None,
+            None,
+        )
     if rank_out is None:
         st.error("Ranking failed. See logs.")
         st.stop()
@@ -1993,14 +2052,15 @@ if run:
                 st.text("Running rerank_with_transcript_ultra_window() ...")
         
         update_log()
-        (reranked_df, buf3) = run_with_logs(
-            rerank_with_transcript_ultra_window,
-            results, query_vi, SEEDS,
-            60, DELTA_SEC,
-            0.6, 0.4,
-            {"any": 0.5, "phr": 0.5}, True, True,
-            workers=8, phrases_only=False, max_unigrams=16, max_phrases=10
-        )
+        with st.spinner("📑 Đang rerank theo transcript..."):
+            (reranked_df, buf3) = run_with_logs(
+                rerank_with_transcript_ultra_window,
+                results, query_vi, SEEDS,
+                60, DELTA_SEC,
+                0.6, 0.4,
+                {"any": 0.5, "phr": 0.5}, True, True,
+                workers=8, phrases_only=False, max_unigrams=16, max_phrases=10
+            )
         if reranked_df is None or isinstance(reranked_df, tuple):
             st.error("Rerank failed. See logs.")
             st.stop()
