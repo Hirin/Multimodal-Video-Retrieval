@@ -1093,6 +1093,13 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                         <label for="goto-frame-{video_id}"><strong>Go to Frame:</strong></label>
                         <input type="number" id="goto-frame-{video_id}" placeholder="Enter frame and press Enter" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid #555; background:#2a2a2a; color:#fff;" />
                     </div>
+                    <div style="margin-top:10px;">
+                        <div style="display:flex; justify-content:space-between;">
+                            <span id="frame-left-{video_id}"><strong>{int(start_time * fps)} F</strong></span>
+                            <span id="frame-right-{video_id}"><strong>-- F</strong></span>
+                        </div>
+                        <input type="range" id="seek-frame-{video_id}" min="0" max="{int(max(1, int(start_time * fps) + 1))}" step="1" value="{int(start_time * fps)}" style="width:100%;">
+                    </div>
                 </div>
                 
                 <div class="info-grid">
@@ -1180,6 +1187,13 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                         if (formattedEl) {{
                             formattedEl.textContent = formattedTime;
                         }}
+                        // Sync frame slider while not dragging
+                        var frameSlider = document.getElementById('seek-frame-{video_id}');
+                        var frameLeft = document.getElementById('frame-left-{video_id}');
+                        if (frameSlider && !window._seeking_{video_id.replace('-', '_')}) {{
+                            frameSlider.value = currentFrame;
+                            if (frameLeft) frameLeft.innerHTML = '<strong>' + currentFrame + ' F</strong>';
+                        }}
                         
                     }} catch (e) {{
                         addDebugLog_{video_id.replace('-', '_')}(`Error getting current time: ${{e.message}}`);
@@ -1214,6 +1228,28 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                         }}
                     }});
                 }}
+                // Setup frame slider handlers
+                window._seeking_{video_id.replace('-', '_')} = false;
+                var frameSlider = document.getElementById('seek-frame-{video_id}');
+                var frameLeft = document.getElementById('frame-left-{video_id}');
+                if (frameSlider) {{
+                    frameSlider.addEventListener('input', function() {{
+                        window._seeking_{video_id.replace('-', '_')} = true;
+                        var f = parseInt(frameSlider.value, 10) || 0;
+                        if (frameLeft) frameLeft.innerHTML = '<strong>' + f + ' F</strong>';
+                    }});
+                    frameSlider.addEventListener('change', function() {{
+                        var f = parseInt(frameSlider.value, 10) || 0;
+                        var t = f / fps;
+                        addDebugLog_{video_id.replace('-', '_')}('Seeking to frame ' + f + ' (t=' + t.toFixed(2) + 's) via slider');
+                        if (player_{video_id.replace('-', '_')} && typeof player_{video_id.replace('-', '_')}.seekTo === 'function') {{
+                            try {{ player_{video_id.replace('-', '_')}.seekTo(t, true); }} catch(err) {{ addDebugLog_{video_id.replace('-', '_')}('Seek error: ' + err.message); }}
+                        }}
+                        window._seeking_{video_id.replace('-', '_')} = false;
+                    }});
+                    frameSlider.addEventListener('mousedown', function() {{ window._seeking_{video_id.replace('-', '_')} = true; }});
+                    frameSlider.addEventListener('mouseup', function() {{ window._seeking_{video_id.replace('-', '_')} = false; }});
+                }}
             }});
             
             function onYouTubeIframeAPIReady() {{
@@ -1230,6 +1266,16 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
             function onPlayerReady_{video_id.replace('-', '_')}(event) {{
                 addDebugLog_{video_id.replace('-', '_')}('Player ready, starting time updates');
                 document.getElementById('status-{video_id}').textContent = 'Player Ready';
+                try {{
+                    var dur = player_{video_id.replace('-', '_')}.getDuration ? player_{video_id.replace('-', '_')}.getDuration() : null;
+                    var frameSlider = document.getElementById('seek-frame-{video_id}');
+                    var frameRight = document.getElementById('frame-right-{video_id}');
+                    if (frameSlider && dur && isFinite(dur) && dur > 0) {{
+                        var maxF = Math.floor(dur * fps);
+                        frameSlider.max = maxF;
+                        if (frameRight) frameRight.innerHTML = '<strong>' + maxF + ' F</strong>';
+                    }}
+                }} catch(_e) {{}}
                 startTimeUpdates_{video_id.replace('-', '_')}();
             }}
             
