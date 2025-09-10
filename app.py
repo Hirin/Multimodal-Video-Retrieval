@@ -91,7 +91,7 @@ USE_LLM_ASPECTS = bool(GEMINI_API_KEY)
 WINDOW_SEC = 40.0
 SKIP_SEC = 0.0
 DELTA_SEC = 20.0
-TOP_VIDEOS = 10
+TOP_VIDEOS = 20
 LIMIT_VIDEOS = None
 EXCLUDE_SER = set()
 
@@ -109,6 +109,23 @@ def sec_to_mmss(t: float) -> str:
     if s == 60:
         m, s = m + 1, 0
     return f"{m:02d}:{s:02d}"
+
+def parse_mmss(s: str, default_sec: float = 0.0) -> float:
+    """Parse 'mm:ss' or raw seconds string to float seconds. Returns default on error."""
+    try:
+        s = (s or "").strip()
+        if not s:
+            return float(default_sec)
+        if ":" in s:
+            parts = s.split(":", 1)
+            mm = int(parts[0]) if parts[0] else 0
+            ss = int(parts[1]) if parts[1] else 0
+            return max(0.0, float(mm * 60 + ss))
+        # fallback: raw seconds
+        val = float(s)
+        return max(0.0, val)
+    except Exception:
+        return float(default_sec)
 
 def dataset_for_video(video_id: str) -> str:
     return "b1" if video_id.startswith("L") else "b2"
@@ -422,7 +439,7 @@ FALLBACK = {
 }
 
 def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.7, top_p: float = 0.9,
-                                         model: str = "gemini-2.5-pro", max_aspects: str = "N") -> Dict:
+                                         model: str = "gemini-2.5-flash", max_aspects: str = "N") -> Dict:
     if not (USE_LLM_ASPECTS and GEMINI_API_KEY):
         print("[Gemini] Using FALLBACK aspects/seeds (no API key)")
         return {"aspects": FALLBACK.get("aspects", []), "seeds": FALLBACK.get("seeds", {}), "source": "fallback", "error": "no_api_key"}
@@ -430,7 +447,7 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
         "Bạn là công cụ xây dựng truy vấn cho video retrieval.\n"
         "- Đầu vào: miêu tả TỰ NHIÊN (tiếng Việt/Anh).\n"
         "- Đầu ra: JSON với hai trường: 'aspects' và 'seeds'.\n"
-        f"  * aspects: mảng {max_aspects} phần tử. Mỗi phần tử có name(VI), prompts(2-4 EN), weight>0(Tự đánh giá).\n"
+        f"  * aspects: mảng {max_aspects} phần tử. Mỗi phần tử có name(VI), prompts(2-4 EN), weight trong khoảng [0.8, 1.3](Tự đánh giá).\n"
         "  * seeds: { 'unigrams': ≤28, 'phrases': ≤18 } bằng TIẾNG VIỆT.\n"
         "JSON hợp lệ, không kèm bình luận."
     )
@@ -1046,7 +1063,7 @@ def rerank_with_transcript_ultra_window(
         print(f"[ULTRA-WIN] elapsed: {time.perf_counter() - t0:.3f}s (candidates={len(df)})")
     return df
 
-def reorder_results_by_df(orig_results, ranked_df, top_videos=10):
+def reorder_results_by_df(orig_results, ranked_df, top_videos=TOP_VIDEOS):
     order = ranked_df.head(top_videos)["video_id"].tolist()
     vid2r = {r["video_id"]: r for r in orig_results}
     return [vid2r[v] for v in order if v in vid2r]
@@ -1113,10 +1130,7 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                     </div>
                 </div>
                 
-                <h4>Debug Log:</h4>
-                <div class="debug" id="debug-log-{video_id}">
-                    <div>Loading YouTube API...</div>
-                </div>
+                
             </div>
             
             <div class="video-panel">
@@ -1146,7 +1160,9 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                 debugCount_{video_id.replace('-', '_')}++;
                 var debugEl = document.getElementById('debug-log-{video_id}');
                 var timestamp = new Date().toLocaleTimeString();
-                debugEl.innerHTML += `<div>[${{timestamp}}] ${{debugCount_{video_id.replace('-', '_')}}}: ${{message}}</div>`;
+                if (debugEl) {{
+                    debugEl.innerHTML += `<div>[${{timestamp}}] ${{debugCount_{video_id.replace('-', '_')}}}: ${{message}}</div>`;
+                }}
                 console.log(`[${{timestamp}}] ${{message}}`);
             }}
             
@@ -1498,7 +1514,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
         with col_model:
             gemini_model = st.selectbox(
                 "Gemini Model:",
-                ["gemini-2.5-pro", "gemini-2.5-flash"],
+                ["gemini-2.5-flash", "gemini-2.5-pro"],
                 index=0,
                 help="gemini-2.5-pro: High quality, gemini-2.5-flash: Fast speed"
             )
@@ -1569,8 +1585,114 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
     else:
         st.warning("⚠️ **API Key Status:** Not configured")
 
-# Row 3: Query input
+# Row 3: Setting
+with st.expander("⚙️ Setting", expanded=False):
+    st.markdown("**Time Settings**")
+    # Apply pending inputs BEFORE widgets are created
+    _pending = st.session_state.pop('pending_setting_inputs', None)
+    if _pending:
+        # Clear previous widget states so value= is used
+        for _k in ['win_str_inp', 'skip_str_inp', 'del_str_inp', 'topk_inp']:
+            try:
+                st.session_state.pop(_k)
+            except Exception:
+                pass
+    _win_default = (_pending.get('win') if _pending else sec_to_mmss(float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))))
+    _skip_default = (_pending.get('skip') if _pending else sec_to_mmss(float(st.session_state.get('SKIP_SEC', SKIP_SEC))))
+    _del_default = (_pending.get('del') if _pending else sec_to_mmss(float(st.session_state.get('DELTA_SEC', DELTA_SEC))))
+    _top_default = (_pending.get('top') if _pending else int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS)))
+
+    col_win, col_skip, col_del, col_top = st.columns([1, 1, 1, 1])
+    with col_win:
+        win_str_inp = st.text_input(
+            "Window Second (mm:ss)",
+            value=st.session_state.get('win_str_inp', _win_default),
+            key="win_str_inp",
+            help="Độ dài cửa sổ trượt khi tính CLIP window score"
+        )
+    with col_skip:
+        skip_str_inp = st.text_input(
+            "Skip Intro (mm:ss)",
+            value=st.session_state.get('skip_str_inp', _skip_default),
+            key="skip_str_inp",
+            help="Skip phần intro của video"
+        )
+    with col_del:
+        del_str_inp = st.text_input(
+            "Rerank Window (mm:ss)",
+            value=st.session_state.get('del_str_inp', _del_default),
+            key="del_str_inp",
+            help="Mở rộng cửa sổ t0/t1 khi rerank transcript"
+        )
+    with col_top:
+        topk_inp = st.number_input(
+            "Top K",
+            min_value=1,
+            max_value=200,
+            value=int(st.session_state.get('topk_inp', _top_default)),
+            step=1,
+            key="topk_inp",
+            help="Số video hiển thị tối đa"
+        )
+    # Show Update button only when any value differs
+    pending_change = (
+        sec_to_mmss(float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))) != win_str_inp or
+        sec_to_mmss(float(st.session_state.get('SKIP_SEC', SKIP_SEC))) != skip_str_inp or
+        sec_to_mmss(float(st.session_state.get('DELTA_SEC', DELTA_SEC))) != del_str_inp or
+        int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS)) != int(topk_inp)
+    )
+    col_sp, col_btn_upd, col_btn_reset, col_btn_def = st.columns([5, 1, 1, 1])
+    with col_btn_upd:
+        update_cfg = st.button("Update Setting", type="secondary") if pending_change else None
+    with col_btn_reset:
+        reset_cfg = st.button("Reset Setting", type="secondary") if pending_change else None
+    with col_btn_def:
+        default_cfg = st.button("Default Setting", type="secondary")
+
+    if update_cfg:
+        st.session_state['WINDOW_SEC'] = parse_mmss(win_str_inp, WINDOW_SEC)
+        st.session_state['SKIP_SEC'] = parse_mmss(skip_str_inp, SKIP_SEC)
+        st.session_state['DELTA_SEC'] = parse_mmss(del_str_inp, DELTA_SEC)
+        st.session_state['TOP_VIDEOS'] = int(topk_inp)
+        st.rerun()
+    if 'reset_cfg' in locals() and reset_cfg:
+        # Set pending inputs to current applied settings and rerun
+        _w = float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))
+        _s = float(st.session_state.get('SKIP_SEC', SKIP_SEC))
+        _d = float(st.session_state.get('DELTA_SEC', DELTA_SEC))
+        _t = int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS))
+        st.session_state['pending_setting_inputs'] = {
+            'win': sec_to_mmss(_w),
+            'skip': sec_to_mmss(_s),
+            'del': sec_to_mmss(_d),
+            'top': _t,
+        }
+        st.rerun()
+    if 'default_cfg' in locals() and default_cfg:
+        # Restore defaults
+        st.session_state['WINDOW_SEC'] = 40.0
+        st.session_state['SKIP_SEC'] = 0.0
+        st.session_state['DELTA_SEC'] = 20.0
+        st.session_state['TOP_VIDEOS'] = 20
+        st.session_state['pending_setting_inputs'] = {
+            'win': sec_to_mmss(40.0),
+            'skip': sec_to_mmss(0.0),
+            'del': sec_to_mmss(20.0),
+            'top': 20,
+        }
+        st.rerun()
+
+# Row 4: Query input
 col_max_aspects, col_mode = st.columns([1.2, 2])
+
+# Apply runtime overrides from session so settings affect ranking
+try:
+    WINDOW_SEC = float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))
+    SKIP_SEC = float(st.session_state.get('SKIP_SEC', SKIP_SEC))
+    DELTA_SEC = float(st.session_state.get('DELTA_SEC', DELTA_SEC))
+    TOP_VIDEOS = int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS))
+except Exception:
+    pass
 
 with col_max_aspects:
     max_aspects_input = st.text_input(
@@ -1595,6 +1717,14 @@ with col_mode:
 # Derive mode flags from selection
 rerank_enabled = (search_mode == "CLIP Multi-aspects Search + Rerank")
 bm25_enabled = (search_mode == "BM25 Keyword Search")
+
+# Reset run/caches when switching modes to prevent unintended auto-runs
+if 'last_mode' not in st.session_state:
+    st.session_state['last_mode'] = search_mode
+elif st.session_state['last_mode'] != search_mode:
+    st.session_state['run_flag'] = False
+    st.session_state['auto_run_after_enhance'] = False
+    st.session_state['last_mode'] = search_mode
 
 # Gemini availability toggle (placed below Max aspects and above query input)
 gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
@@ -1660,7 +1790,7 @@ if bm25_enabled:
             | `OR` | `OR` | `cát OR biển` | At least one word |
             | `NOT` | `NOT` | `cát NOT biển` | First without second |
             | `&` | `AND` | `cát & điêu` | Same as AND |
-            | `\|` | `OR` | `cát \| biển` | Same as OR |
+            | `\\|` | `OR` | `cát \\| biển` | Same as OR |
             | `"phrase"` | `"phrase"` | `"công an"` | Exact phrase match |
             """)
 
@@ -1676,7 +1806,7 @@ Nhấn nút "📚 BM25 Query Syntax" để xem chi tiết syntax."""
 else:
     placeholder_text = "Nhập miêu tả truy vấn tiếng Việt / English ..."
 
-query_vi = st.text_area("Enter Query:", height=120, placeholder=placeholder_text)
+query_vi = st.text_area("Enter Query:", height=150, placeholder=placeholder_text)
 
 # Button styling for full width
 st.markdown(
@@ -1744,8 +1874,11 @@ if 'query_enhanced' not in st.session_state:
 if 'enhanced_data' not in st.session_state:
     st.session_state.enhanced_data = None
 
-# Row 4: Query buttons - Conditional display based on search mode
-run = False  # Initialize run variable
+# Row 5: Query buttons - Conditional display based on search mode
+# Persist run flag across reruns so UI remains in results state
+if 'run_flag' not in st.session_state:
+    st.session_state['run_flag'] = False
+run = st.session_state['run_flag']
 
 # Check if Gemini API is configured
 gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
@@ -1754,6 +1887,7 @@ gemini_available = 'turn_off_gemini' in st.session_state and gemini_configured a
 # Auto-run once after first enhance (so buttons switch to Run/Reset immediately)
 if st.session_state.get('auto_run_after_enhance', False):
     run = True
+    st.session_state['run_flag'] = True  # persist results state across reruns
     st.session_state['auto_run_after_enhance'] = False
 
 # Default values for Gemini parameters (when API is not configured)
@@ -1767,7 +1901,7 @@ if bm25_enabled:
         if not query_vi.strip():
             st.error("Please enter a query first!")
         else:
-            run = True
+            run = True; st.session_state['run_flag'] = True
             st.info("🔍 **BM25 Keyword Search** - Searching directly by keywords")
 elif gemini_available:
     # CLIP mode with Gemini - show Enhance Query first, then Run Query
@@ -1790,6 +1924,7 @@ elif gemini_available:
                         st.success("✅ Query enhanced successfully! Running search...")
                         # Trigger a rerun where Run/Reset buttons show and auto-run executes once
                         st.session_state['auto_run_after_enhance'] = True
+                        st.session_state['run_flag'] = True
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to enhance query: {e}")
@@ -1802,10 +1937,12 @@ elif gemini_available:
             reset_button = st.button("🔄 Reset Query", use_container_width=True)
 
         if run_button:
-            run = True
+            run = True; st.session_state['run_flag'] = True
         if reset_button:
             st.session_state.query_enhanced = False
             st.session_state.enhanced_data = None
+            st.session_state['run_flag'] = False
+            st.session_state.pop('clip_cache', None)
             st.rerun()
 else:
     # CLIP mode without Gemini - show Run Query directly with fallback
@@ -1814,12 +1951,12 @@ else:
         if not query_vi.strip():
             st.error("Please enter a query first!")
         else:
-            run = True
+            run = True; st.session_state['run_flag'] = True
             # Use fallback translation directly
             st.info("ℹ️ **Using Fallback Translation** - Configure Gemini API for better results")
 
 # Row 5: Logs expander
-log_exp = st.expander("Logs", expanded=False)
+log_exp = st.expander("📝 Logs", expanded=False)
 log_container = log_exp.empty()
 
 def run_with_logs(fn, *args, **kwargs):
@@ -1834,24 +1971,11 @@ def run_with_logs(fn, *args, **kwargs):
     finally:
         pass  # Don't update log here, we'll handle it manually
 
-# Row 6: Config expander
-with st.expander("Config", expanded=False):
-    b1_db = st.text_input("Text BM25 B1 DB Path", value=B1_DB_PATH)
-    b2_db = st.text_input("Text BM25 B2 DB Path", value=B2_DB_PATH)
-    top_k = st.number_input("Top-K videos", min_value=1, max_value=200, value=DEFAULT_TOP_K, step=1)
-    b1_clip = st.text_input("CLIP features B1 dir", value=B1["clip_dir"])
-    b2_clip = st.text_input("CLIP features B2 dir", value=B2["clip_dir"])
-
-# Apply editable config for runtime
-B1_DB_PATH = b1_db or B1_DB_PATH
-B2_DB_PATH = b2_db or B2_DB_PATH
-B1["clip_dir"] = b1_clip or B1["clip_dir"]
-B2["clip_dir"] = b2_clip or B2["clip_dir"]
-TOP_VIDEOS = int(top_k)
-
-# Row 7 & 8: Results areas (placeholders)
+# Row 8 & 9: Results areas (placeholders)
 clip_results_container = st.empty()
 rerank_results_container = st.empty()
+
+# (Dynamic sidebar for sorting will be rendered after results are available in CLIP mode only)
 
 if run:
     # Check if BM25 search is enabled
@@ -2031,29 +2155,73 @@ if run:
     
     update_log()
 
-    # 1) CLIP rank
+    # 1) CLIP rank (only if run_flag or cache already available)
+    if not st.session_state.get('run_flag') and not st.session_state.get('clip_cache'):
+        st.stop()
     clip_dirs = []
     if "b1" in DATASETS: clip_dirs.append(B1["clip_dir"])  # for visibility in logs
     if "b2" in DATASETS: clip_dirs.append(B2["clip_dir"])  # for visibility in logs
     print_msg = f"[Rank] DATASETS={DATASETS} | clip_dirs={clip_dirs} | window={WINDOW_SEC}s | skip={SKIP_SEC}s"
-    with st.spinner("🎬 Đang chạy CLIP search..."):
-        (rank_out, buf2) = run_with_logs(
-            rank_videos_clip_window,
-            ASPECTS,
-            LIMIT_VIDEOS,
-            WINDOW_SEC,
-            SKIP_SEC,
-            None,
-            EXCLUDE_SER,
-            None,
-            None,
-            None,
-            None,
-        )
-    if rank_out is None:
-        st.error("Ranking failed. See logs.")
-        st.stop()
-    (results, aspect_names, aspect_weights) = rank_out
+    # Build a cache key based on aspects + runtime filters to avoid recomputation when sorting
+    try:
+        cache_key = json.dumps({
+            "aspects": ASPECTS,
+            "datasets": sorted(list(DATASETS)),
+            "window": WINDOW_SEC,
+            "skip": SKIP_SEC,
+            "exclude_series": exclude_series_list,
+            "exclude_videos": exclude_videos_list,
+        }, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        cache_key = None
+
+    cache_hit = bool(st.session_state.get("clip_cache") and st.session_state["clip_cache"].get("key") == cache_key)
+    if cache_hit:
+        buf2 = io.StringIO("[CACHE] Using cached CLIP results for interactive sorting\n")
+        results = st.session_state["clip_cache"]["results"]
+        aspect_names = st.session_state["clip_cache"].get("aspect_names", [])
+        aspect_weights = st.session_state["clip_cache"].get("aspect_weights", [1.0]*len(aspect_names))
+    else:
+        with st.spinner("🎬 Đang chạy CLIP search..."):
+            (rank_out, buf2) = run_with_logs(
+                rank_videos_clip_window,
+                ASPECTS,
+                LIMIT_VIDEOS,
+                WINDOW_SEC,
+                SKIP_SEC,
+                None,
+                EXCLUDE_SER,
+                None,
+                None,
+                None,
+                None,
+            )
+        if rank_out is None:
+            st.error("Ranking failed. See logs.")
+            st.stop()
+        (results, aspect_names, aspect_weights) = rank_out
+        # Save cache for subsequent sidebar sorting reruns
+        try:
+            st.session_state["clip_cache"] = {
+                "key": cache_key,
+                "results": results,
+                "aspect_names": aspect_names,
+                "aspect_weights": aspect_weights,
+            }
+        except Exception:
+            pass
+
+    # Ensure cache exists immediately after auto-run (first enhance)
+    if not st.session_state.get("clip_cache"):
+        try:
+            st.session_state["clip_cache"] = {
+                "key": cache_key,
+                "results": results,
+                "aspect_names": aspect_names,
+                "aspect_weights": aspect_weights,
+            }
+        except Exception:
+            pass
 
     # Apply search filters to CLIP results
     results = apply_search_filters(results, exclude_series_list, exclude_videos_list)
@@ -2070,7 +2238,53 @@ if run:
 
     # Row 7: Show CLIP results only when rerank is disabled
     if not rerank_enabled:
+        # Cache results for interactive sorting without re-running (preserve existing key)
+        try:
+            _cc = dict(st.session_state.get("clip_cache", {}))
+            _cc.update({"results": results, "aspect_names": aspect_names})
+            st.session_state["clip_cache"] = _cc
+        except Exception:
+            pass
+
+        # Render Aspects Sort + Results (in the same container, sort UI above results)
         with clip_results_container.container():
+            if results and aspect_names:
+                with st.expander("↔️ Adjust Aspects (Only works with basic CLIP mode)", expanded=False):
+                    # Sliders to adjust aspect weights (persistent during session)
+                    weight_key = st.session_state.get("clip_cache", {}).get("key", "default")
+                    if 'aspect_weight_overrides' not in st.session_state:
+                        st.session_state['aspect_weight_overrides'] = {}
+                    overrides_all = st.session_state['aspect_weight_overrides']
+                    overrides = overrides_all.get(weight_key, {})
+
+                    cols = st.columns(len(aspect_names)) if len(aspect_names) > 0 else [st]
+                    new_weights = []
+                    for idx, name in enumerate(aspect_names):
+                        default_w = float(aspect_weights[idx]) if idx < len(aspect_weights) else 1.0
+                        default_w = max(0.5, min(1.6, default_w))
+                        with cols[idx % len(cols)]:
+                            w = st.slider(
+                                label=name,
+                                min_value=0.5,
+                                max_value=1.6,
+                                value=float(overrides.get(idx, default_w)),
+                                step=0.05,
+                                key=f"aspect_weight_slider_{idx}"
+                            )
+                            new_weights.append(w)
+                    overrides_all[weight_key] = {i: new_weights[i] for i in range(len(new_weights))}
+                    st.caption("Kéo slider để tăng/giảm trọng số từng aspect (0.5 → 1.6). Sắp xếp theo tổng điểm có trọng số mới.")
+
+                    # Re-rank view by weighted sum of aspect scores using sliders (no rescoring)
+                    def _weighted_sum(win, wts):
+                        scores = win.get("aspect_scores", [])
+                        s = 0.0
+                        for i, w in enumerate(wts):
+                            if i < len(scores):
+                                s += float(w) * float(scores[i])
+                        return s
+                    results = sorted(results, key=lambda r: _weighted_sum(r["win"], new_weights), reverse=True)
+
             st.subheader("CLIP Multi-Aspects Results")
             if not results:
                 st.info("No results found (check feature directories and dataset selection).")
