@@ -1028,6 +1028,38 @@ def rerank_with_transcript_ultra_window(
         max_unigrams=(0 if phrases_only else max_unigrams),
         max_phrases=max_phrases
     )
+    # Verbose introspection of what will be used for rerank
+    if verbose:
+        seed_uni = seeds.get("unigrams", []) if isinstance(seeds, dict) else []
+        seed_phr = seeds.get("phrases", []) if isinstance(seeds, dict) else []
+        seeds_empty = (len(seed_uni) == 0 and len(seed_phr) == 0)
+        # Preview helpers
+        def _preview_list(values, limit):
+            try:
+                values = list(values)
+            except Exception:
+                values = []
+            if len(values) <= limit:
+                return values
+            return values[:limit] + ["..."]
+
+        def _trim_str(s: str | None, max_len: int = 400) -> str:
+            if s is None:
+                return "None"
+            if len(s) <= max_len:
+                return s
+            return f"{s[:max_len]}... (+{len(s) - max_len} chars)"
+
+        uni_prev = _preview_list(uni, 24)
+        phr_prev = _preview_list(phr, 16)
+        print(
+            f"[ULTRA-WIN][KEYS] seeds_empty={seeds_empty} | seed_uni={len(seed_uni)} | seed_phr={len(seed_phr)} | "
+            f"derived_uni={len(uni)} | derived_phr={len(phr)}"
+        )
+        print(f"[ULTRA-WIN][UNI] {', '.join(map(str, uni_prev))}")
+        print(f"[ULTRA-WIN][PHR] {', '.join(map(lambda p: f'\"{p}\"' if p != '...' else '...', phr_prev))}")
+        print(f"[ULTRA-WIN][q_any] {_trim_str(q_any)}")
+        print(f"[ULTRA-WIN][q_phr] {_trim_str(q_phr)}")
     if phrases_only:
         q_any = None
     parts = []
