@@ -1089,6 +1089,10 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                     <p><strong>FPS:</strong> {fps}</p>
                     <p><strong>Status:</strong> <span id="status-{video_id}">Initializing...</span></p>
                     <p><strong>Player State:</strong> <span id="player-state-{video_id}">Unknown</span></p>
+                    <div style="margin-top:10px;">
+                        <label for="goto-frame-{video_id}"><strong>Go to Frame:</strong></label>
+                        <input type="number" id="goto-frame-{video_id}" placeholder="Enter frame and press Enter" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid #555; background:#2a2a2a; color:#fff;" />
+                    </div>
                 </div>
                 
                 <div class="info-grid">
@@ -1184,6 +1188,33 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                     addDebugLog_{video_id.replace('-', '_')}('Player not ready or getCurrentTime not available');
                 }}
             }}
+
+            // Handle Go to Frame input (seek on Enter)
+            document.addEventListener('DOMContentLoaded', function() {{
+                var input = document.getElementById('goto-frame-{video_id}');
+                if (input) {{
+                    input.addEventListener('keydown', function(e) {{
+                        if (e.key === 'Enter') {{
+                            var f = parseInt(input.value, 10);
+                            if (!isNaN(f) && f >= 0) {{
+                                var t = f / fps;
+                                addDebugLog_{video_id.replace('-', '_')}('Seeking to frame ' + f + ' (t=' + t.toFixed(2) + 's)');
+                                if (player_{video_id.replace('-', '_')} && typeof player_{video_id.replace('-', '_')}.seekTo === 'function') {{
+                                    try {{
+                                        player_{video_id.replace('-', '_')}.seekTo(t, true);
+                                    }} catch (err) {{
+                                        addDebugLog_{video_id.replace('-', '_')}('Seek error: ' + err.message);
+                                    }}
+                                }} else {{
+                                    addDebugLog_{video_id.replace('-', '_')}('Seek unavailable: player not ready');
+                                }}
+                            }} else {{
+                                addDebugLog_{video_id.replace('-', '_')}('Invalid frame input');
+                            }}
+                        }}
+                    }});
+                }}
+            }});
             
             function onYouTubeIframeAPIReady() {{
                 addDebugLog_{video_id.replace('-', '_')}('YouTube API ready, initializing player');
