@@ -74,6 +74,14 @@ If `n` is missing, the app estimates frames from time and `fps` plus a heuristic
 
 ---
 
+## 🧰 Minimum requirements
+
+- **Python**: 3.10+ (3.11 recommended)
+- **Operating system**: Windows 10/11, macOS, or Linux
+- **GPU**: Not required (the app only encodes CLIP text; CPU is sufficient)
+- **SQLite FTS5**: Required for BM25/FTS5; Python 3.10+ usually includes FTS5. If you encounter FTS5 errors, use a newer Python version.
+- **Data**: The `DATA_ROOT` variable should point to a directory containing `b1/` and `b2/` as described below (minimum: `clip-features-32/*.npy`, `map-keyframes/*.csv`, `text_bm25.db`).
+
 ## 🔧 Installation
 
 > Python 3.10+ recommended. GPU is optional (CLIP text encodes only).
