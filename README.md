@@ -95,15 +95,14 @@ pip install open-clip-torch          # preferred
 # Optional alternative:
 # pip install git+https://github.com/openai/CLIP.git
 
-# Gemini (two SDKs are referenced by the code)
-pip install google-genai>=0.3.0      # used in main extractor (Client API)
-pip install google-generativeai>=0.7 # used in the small "Test API" panel
+# Gemini (new official SDK used throughout the app)
+pip install google-genai>=0.8.0
 
 # Parquet (optional but recommended for fast metadata)
 pip install pyarrow fastparquet
 ```
 
-> If you only want the **new** `google-genai` SDK, either install both packages as above or update the “Test Gemini API” block to also use `google.genai.Client` for consistency.
+> The app now uses only the **new** `google-genai` SDK (`google.genai.Client`).
 
 ---
 

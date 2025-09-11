@@ -1576,7 +1576,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
 
     test_button = st.button("🧪 Test Gemini API", type="primary")
     
-    # Test API connection
+    # Test API connection (using google-genai Client)
     if test_button:
         if not api_key:
             st.error("❌ Please enter your Gemini API key first!")
@@ -1586,16 +1586,17 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
                     # Test with a simple prompt
                     test_prompt = "Hello! Please respond with 'API connection successful' if you can read this message."
 
-                    # Import and test Gemini
-                    import google.generativeai as genai
-                    genai.configure(api_key=api_key)
-                    model = genai.GenerativeModel('gemini-2.5-pro')
-                    
-                    response = model.generate_content(test_prompt)
-                    response_text = response.text.strip()
+                    # Use the new google-genai SDK consistently
+                    from google import genai
+                    client = genai.Client(api_key=api_key)
+                    resp = client.models.generate_content(
+                        model='gemini-2.0-flash',
+                        contents=test_prompt
+                    )
+                    response_text = (getattr(resp, "text", None) or getattr(resp, "output_text", None) or "").strip()
 
                     if response_text:
-                        st.success(f"✅ **Gemini API Test Successful!**")
+                        st.success("✅ **Gemini API Test Successful!**")
                         st.info(f"**Response:** {response_text}")
                         st.markdown("🎉 Your Gemini API is working correctly and ready to use!")
                     else:
@@ -1603,7 +1604,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
                         st.markdown("The API connection works but returned no content.")
 
                 except Exception as e:
-                    st.error(f"❌ **Gemini API Test Failed!**")
+                    st.error("❌ **Gemini API Test Failed!**")
                     st.error(f"**Error:** {str(e)}")
                     st.markdown("**Common issues:**")
                     st.markdown("- Invalid API key")
