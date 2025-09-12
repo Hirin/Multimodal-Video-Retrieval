@@ -1195,6 +1195,7 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
             .trake-confirm-btn:hover { background: #218838; }
             .save-csv-btn { padding: 8px 20px; border: 1px solid #17a2b8; background: #17a2b8; color: #fff; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; }
             .save-csv-btn:hover { background: #138496; }
+            .save-csv-btn.import-btn:hover { background: #218838; }
             .trake-scene-input { margin-bottom: 8px; }
             .trake-scene-input label { display: block; font-size: 12px; margin-bottom: 4px; color: #ccc; }
             .trake-scene-input input { width: 200px; padding: 4px 8px; border: 1px solid #777; border-radius: 3px; background: #1f1f1f; color: #fff; font-size: 11px; }
@@ -1354,10 +1355,12 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
             </div>
             </div>
             
-        <!-- Save CSV button above Preview Result -->
+        <!-- Export/Import CSV buttons above Preview Result -->
         <div style="text-align:right; margin:1px 0; padding:1px 0; position:relative;">
-            <button id="save-csv-<<video_id>>" class="save-csv-btn">Save CSV</button>
-            <div id="save-csv-notification-<<video_id>>" class="notification" style="position:absolute; top:100%; right:0; left:auto; margin-top:5px; text-align:right; max-width:300px;"></div>
+            <button id="import-csv-<<video_id>>" class="save-csv-btn import-btn" style="margin-right:10px; background:#28a745; border-color:#28a745;">Import CSV</button>
+            <button id="export-csv-<<video_id>>" class="save-csv-btn">Export CSV</button>
+            <input type="file" id="csv-file-input-<<video_id>>" accept=".csv" style="display:none;">
+            <div id="csv-notification-<<video_id>>" class="notification" style="position:absolute; top:100%; right:0; left:auto; margin-top:5px; text-align:right; max-width:300px;"></div>
         </div>
         
         <!-- Preview Result (outside the main container) -->
@@ -1859,39 +1862,42 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                     deleteRangeBtn.addEventListener('click', deleteRangePreviewRows_<<vid_us>>);
                 }
 
-                // Save CSV button event listener
-                var saveCsvBtn = document.getElementById('save-csv-<<video_id>>');
-                var saveCsvNotification = document.getElementById('save-csv-notification-<<video_id>>');
+                // Export/Import CSV buttons event listeners
+                var exportCsvBtn = document.getElementById('export-csv-<<video_id>>');
+                var importCsvBtn = document.getElementById('import-csv-<<video_id>>');
+                var csvFileInput = document.getElementById('csv-file-input-<<video_id>>');
+                var csvNotification = document.getElementById('csv-notification-<<video_id>>');
                 
-                function showSaveNotification(message, isError = false) {
-                    if (!saveCsvNotification) return;
-                    saveCsvNotification.textContent = message;
+                function showCsvNotification(message, isError = false) {
+                    if (!csvNotification) return;
+                    csvNotification.textContent = message;
                     if (isError) {
-                        saveCsvNotification.classList.add('error');
+                        csvNotification.classList.add('error');
                     } else {
-                        saveCsvNotification.classList.remove('error');
+                        csvNotification.classList.remove('error');
                     }
-                    saveCsvNotification.classList.add('show');
+                    csvNotification.classList.add('show');
                     setTimeout(function() {
-                        saveCsvNotification.classList.remove('show');
+                        csvNotification.classList.remove('show');
                     }, 3000);
                 }
                 
-                if (saveCsvBtn) {
-                    saveCsvBtn.addEventListener('click', function() {
+                // Export CSV functionality
+                if (exportCsvBtn) {
+                    exportCsvBtn.addEventListener('click', function() {
                         try {
                             var questionCount = document.getElementById('question-count-<<video_id>>').value;
                             var taskValue = document.getElementById('task-select-<<video_id>>').value || 'KIS';
                             
                             // Validate question count
                             if (!questionCount || questionCount.trim() === '' || parseInt(questionCount) <= 0) {
-                                showSaveNotification('Vui lòng nhập số câu hỏi trước khi lưu CSV', true);
+                                showCsvNotification('Vui lòng nhập số câu hỏi trước khi xuất CSV', true);
                                 return;
                             }
                             
-                            // Check if there's data to save
+                            // Check if there's data to export
                             if (!previewData_<<vid_us>> || previewData_<<vid_us>>.length === 0) {
-                                showSaveNotification('Không có dữ liệu để lưu. Vui lòng thêm dữ liệu trước.', true);
+                                showCsvNotification('Không có dữ liệu để xuất. Vui lòng thêm dữ liệu trước.', true);
                                 return;
                             }
                             
@@ -1907,14 +1913,14 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                             
                             // Validate CSV content
                             if (!csvContent || csvContent.trim() === '') {
-                                showSaveNotification('Dữ liệu CSV trống. Vui lòng kiểm tra lại.', true);
+                                showCsvNotification('Dữ liệu CSV trống. Vui lòng kiểm tra lại.', true);
                                 return;
                             }
                             
                             // Check if file would be empty (only whitespace/newlines)
                             var cleanContent = csvContent.replace(/\\n/g, '').replace(/\\r/g, '').trim();
                             if (cleanContent === '') {
-                                showSaveNotification('File sẽ rỗng. Vui lòng thêm dữ liệu trước khi lưu.', true);
+                                showCsvNotification('File sẽ rỗng. Vui lòng thêm dữ liệu trước khi xuất.', true);
                                 return;
                             }
                             
@@ -1930,12 +1936,84 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                             document.body.removeChild(a);
                             window.URL.revokeObjectURL(url);
                             
-                            showSaveNotification('Đã lưu file ' + filename + ' thành công! (' + previewData_<<vid_us>>.length + ' dòng)');
+                            showCsvNotification('Đã xuất file ' + filename + ' thành công! (' + previewData_<<vid_us>>.length + ' dòng)');
                             
                         } catch (error) {
-                            console.error('Error saving CSV:', error);
-                            showSaveNotification('Lỗi khi lưu file: ' + error.message, true);
+                            console.error('Error exporting CSV:', error);
+                            showCsvNotification('Lỗi khi xuất file: ' + error.message, true);
                         }
+                    });
+                }
+                
+                // Import CSV functionality
+                if (importCsvBtn && csvFileInput) {
+                    importCsvBtn.addEventListener('click', function() {
+                        // Check if Preview Result already has data
+                        if (previewData_<<vid_us>> && previewData_<<vid_us>>.length > 0) {
+                            showCsvNotification('Chỉ có thể import khi Preview Result trống. Vui lòng xóa dữ liệu hiện tại trước.', true);
+                            return;
+                        }
+                        
+                        // Trigger file input
+                        csvFileInput.click();
+                    });
+                    
+                    csvFileInput.addEventListener('change', function(event) {
+                        var file = event.target.files[0];
+                        if (!file) return;
+                        
+                        if (!file.name.toLowerCase().endsWith('.csv')) {
+                            showCsvNotification('Vui lòng chọn file CSV hợp lệ.', true);
+                            return;
+                        }
+                        
+                        var reader = new FileReader();
+                        reader.onload = function(e) {
+                            try {
+                                var content = e.target.result;
+                                var lines = content.split('\\n').filter(function(line) {
+                                    return line.trim() !== '';
+                                });
+                                
+                                if (lines.length === 0) {
+                                    showCsvNotification('File CSV trống hoặc không có dữ liệu hợp lệ.', true);
+                                    return;
+                                }
+                                
+                                // Validate CSV format (basic check)
+                                var validLines = [];
+                                for (var i = 0; i < lines.length; i++) {
+                                    var line = lines[i].trim();
+                                    if (line && (line.includes(',') || line.includes('"'))) {
+                                        validLines.push(line);
+                                    }
+                                }
+                                
+                                if (validLines.length === 0) {
+                                    showCsvNotification('File CSV không có định dạng hợp lệ.', true);
+                                    return;
+                                }
+                                
+                                // Import data
+                                previewData_<<vid_us>> = validLines;
+                                renderPreview_<<vid_us>>();
+                                
+                                showCsvNotification('Đã import ' + validLines.length + ' dòng từ file ' + file.name + ' thành công!');
+                                
+                            } catch (error) {
+                                console.error('Error reading CSV file:', error);
+                                showCsvNotification('Lỗi khi đọc file CSV: ' + error.message, true);
+                            }
+                        };
+                        
+                        reader.onerror = function() {
+                            showCsvNotification('Lỗi khi đọc file. Vui lòng thử lại.', true);
+                        };
+                        
+                        reader.readAsText(file, 'UTF-8');
+                        
+                        // Reset file input
+                        event.target.value = '';
                     });
                 }
 
