@@ -83,7 +83,7 @@ B1_DB_PATH = find_db_path(DATA_ROOT, "b1")
 B2_DB_PATH = find_db_path(DATA_ROOT, "b2")
 
 DATASETS = {"b1", "b2"}
-GEMINI_MODEL = "gemini-2.5-pro"
+GEMINI_MODEL = "gemini-2.5-flash"
 GEMINI_MAX_TOKENS = 10000
 # Use GOOGLE_API_KEY for Gemini
 GEMINI_API_KEY = GOOGLE_API_KEY
@@ -1057,7 +1057,7 @@ def rerank_with_transcript_ultra_window(
             f"derived_uni={len(uni)} | derived_phr={len(phr)}"
         )
         print(f"[ULTRA-WIN][UNI] {', '.join(map(str, uni_prev))}")
-        print(f"[ULTRA-WIN][PHR] {', '.join(map(lambda p: f'\"{p}\"' if p != '...' else '...', phr_prev))}")
+        print("[ULTRA-WIN][PHR] " + ", ".join(('"{}'.format(p) + '"') if p != "..." else "..." for p in phr_prev))
         print(f"[ULTRA-WIN][q_any] {_trim_str(q_any)}")
         print(f"[ULTRA-WIN][q_phr] {_trim_str(q_phr)}")
     if phrases_only:
@@ -1101,272 +1101,932 @@ def reorder_results_by_df(orig_results, ranked_df, top_videos=TOP_VIDEOS):
     return [vid2r[v] for v in order if v in vid2r]
 
 # =============================== MEDIA INFO (watch_url) ==================================
+def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25.0, video_name: str = "") -> str:
+    """YouTube player + sliders + top form + Preview Result (fixed page scroll)."""
+    vid_us = video_id.replace('-', '_')
+    start_frame = int(start_time * fps)
+    seek_max_init = max(1, start_frame + 1)
 
-def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25.0) -> str:
-    """Create HTML with working YouTube API and FPS-based frame calculation"""
-    html_content = f"""
+    html_template = r"""
     <!DOCTYPE html>
     <html>
     <head>
         <title>YouTube Player</title>
         <style>
-            body {{ font-family: Arial, sans-serif; margin: 10px; }}
-            .container {{ display: flex; gap: 20px; }}
-            .info-panel {{ flex: 1; background: #2e2e2e; padding: 20px; border-radius: 8px; color: white; }}
-            .video-panel {{ flex: 2; }}
-            .time-display {{ font-size: 24px; color: #00ff00; margin: 10px 0; }}
-            .frame-display {{ font-size: 20px; color: #ff6b6b; margin: 10px 0; }}
-            iframe {{ width: 100%; height: 500px; }}
-            .status {{ margin: 10px 0; }}
-            .debug {{ background: #1a1a1a; padding: 10px; border-radius: 4px; font-family: monospace; font-size: 12px; max-height: 150px; overflow-y: auto; }}
-            .info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }}
-            .info-item {{ background: #3a3a3a; padding: 8px; border-radius: 4px; }}
+            /* ===== FIX: luôn cho phép scroll tới Preview Result ===== */
+            html, body { height: auto !important; min-height: 100% !important; overflow-y: auto !important; }
+            body { font-family: Arial, sans-serif; margin: 10px; padding-bottom: 80px; } /* chừa đáy để kéo thoải mái */
+            /* Một số host set overflow ẩn cho các khối, ta mở lại */
+            .container, .info-panel, .video-panel { overflow: visible !important; }
+
+            .container { display: flex; gap: 20px; }
+            .info-panel { flex: 1; background: #2e2e2e; padding: 20px; border-radius: 8px; color: white; }
+            .video-panel { flex: 2; }
+            .time-display { font-size: 24px; color: #00ff00; margin: 10px 0; }
+            .frame-display { font-size: 20px; color: #ff6b6b; margin: 10px 0; }
+            iframe { width: 100%; height: 500px; display:block; }
+            .status { margin: 10px 0; }
+            .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+            .info-item { background: #3a3a3a; padding: 8px; border-radius: 4px; }
+
+            /* ===== Top row ===== */
+            .top-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
+            .form-group { display: flex; align-items: center; gap: 6px; background: #3a3a3a; padding: 6px 8px; border-radius: 6px; }
+            .form-group label { font-size: 12px; color: #ddd; white-space: nowrap; }
+            .form-group input, .form-group select {
+                height: 30px; min-width: 110px; padding: 0 8px; border-radius: 6px;
+                border: 1px solid #777; background:#1f1f1f; color:#fff; font-size: 13px;
+            }
+
+            /* ===== Range block ===== */
+            .price-input { width: 100%; display: flex; gap: 6px; margin: 10px 0 8px; align-items: center; }
+            .price-input .field { display: flex; width: 100%; height: 36px; align-items: center; }
+            .price-input .field span { font-size: 12px; opacity: 0.8; }
+            .price-input .field input { width: 100%; height: 100%; outline: none; font-size: 14px; margin-left: 8px;
+                                         border-radius: 6px; text-align: center; border: 1px solid #777;
+                                         background:#1f1f1f; color:#fff; min-width: 60px; }
+            .price-input .separator { width: 40px; display: flex; font-size: 14px; align-items: center; justify-content: center; }
+            .slider { height: 6px; position: relative; background: #444; border-radius: 6px; }
+            .slider .progress { height: 100%; left: 0%; right: 100%; position: absolute; border-radius: 6px; background: #17A2B8; }
+            .range-input { position: relative; height: 10px; }
+            .range-input input[type="range"] { position: absolute; width: 100%; height: 6px; top: -6px; background: none;
+                                               pointer-events: none; -webkit-appearance: none; -moz-appearance: none; }
+            .range-input input[type="range"]::-webkit-slider-thumb { height: 16px; width: 16px; border-radius: 50%;
+                                                                      background: #17A2B8; pointer-events: auto; -webkit-appearance: none;
+                                                                      box-shadow: 0 0 6px rgba(0,0,0,0.25); border:2px solid #fff; }
+            .range-input input[type="range"]::-moz-range-thumb { height: 16px; width: 16px; border:none; border-radius: 50%;
+                                                                 background: #17A2B8; pointer-events: auto; -moz-appearance: none; 
+                                                                 box-shadow: 0 0 6px rgba(0,0,0,0.25); }
+            .rs-total { text-align:center; margin-top: 6px; font-size: 12px; opacity: 0.9; }
+            .step-controls { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
+            .step-label { font-size: 10px; color: #aaa; white-space: nowrap; }
+            .step-input { width: 35px; height: 24px; padding: 2px 4px; border: 1px solid #777; border-radius: 4px; 
+                           background: #1f1f1f; color: #fff; font-size: 11px; text-align: center; }
+            .step-btn { width: 18px; height: 24px; border: 1px solid #777; background: #2a2a2a; color: #fff; 
+                         border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+                         font-size: 9px; font-weight: bold; }
+            .step-btn:hover { background: #3a3a3a; }
+            .step-btn:active { background: #1a1a1a; }
+            .add-btn { width: 80px; height: 32px; border: 1px solid #777; background: #0073e6; color: #fff; 
+                      border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }
+            .add-btn:hover { background: #005bb5; }
+            .add-btn:active { background: #004494; }
+            .current-btn { width: 50px; height: 24px; border: 1px solid #777; background: #28a745; color: #fff; 
+                          border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+                          font-size: 10px; font-weight: bold; margin-left: 5px; }
+            .current-btn:hover { background: #218838; }
+            .current-btn:active { background: #1e7e34; }
+
+            /* ===== Preview Result (outside main container) ===== */
+            .preview-wrapper { margin-top: 18px; }
+            .preview-card { background:#2e2e2e; border:1px solid #444; border-radius:8px; overflow:hidden; }
+            .preview-header { display:flex; align-items:center; justify-content:space-between;
+                              padding:10px 12px; background:#1f1f1f; border-bottom:1px solid #444; color:#fff; }
+            .preview-controls { display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
+            .preview-hint { font-size:12px; opacity:0.7; }
+            .delete-range-controls { display:flex; align-items:center; gap:5px; font-size:12px; position: relative; }
+            .delete-range-controls input { padding:2px 4px; border:1px solid #777; border-radius:3px; background:#1f1f1f; color:#fff; font-size:11px; }
+            .delete-range-btn { padding:2px 8px; border:1px solid #dc3545; background:#dc3545; color:#fff; border-radius:3px; cursor:pointer; font-size:11px; }
+            .delete-range-btn:hover { background:#c82333; }
+            .notification { position: absolute; top: 100%; left: 0; right: 0; background: #28a745; color: white; padding: 8px 12px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); z-index: 1000; font-size: 12px; font-weight: 500; opacity: 0; transform: translateY(-10px); transition: all 0.3s ease; margin-top: 5px; }
+            .notification.show { opacity: 1; transform: translateY(0); }
+            .notification.error { background: #dc3545; }
+            .trake-confirm-btn { padding: 6px 16px; border: 1px solid #28a745; background: #28a745; color: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }
+            .trake-confirm-btn:hover { background: #218838; }
+            .save-csv-btn { padding: 8px 20px; border: 1px solid #17a2b8; background: #17a2b8; color: #fff; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; }
+            .save-csv-btn:hover { background: #138496; }
+            .trake-scene-input { margin-bottom: 8px; }
+            .trake-scene-input label { display: block; font-size: 12px; margin-bottom: 4px; color: #ccc; }
+            .trake-scene-input input { width: 200px; padding: 4px 8px; border: 1px solid #777; border-radius: 3px; background: #1f1f1f; color: #fff; font-size: 11px; }
+            .trake-add-btn { width: 60px; height: 28px; border: 1px solid #0073e6; background: #0073e6; color: #fff; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold; margin: 2px; }
+            .trake-add-btn:hover { background: #005bb5; }
+            .trake-add-batch-btn { width: 70px; height: 28px; border: 1px solid #6f42c1; background: #6f42c1; color: #fff; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: bold; margin: 2px; }
+            .trake-add-batch-btn:hover { background: #5a32a3; }
+            .trake-scene-btn { width: 30px; height: 30px; border: 2px solid #dc3545; background: #dc3545; color: #fff; border-radius: 50%; cursor: pointer; font-size: 12px; font-weight: bold; display: flex; align-items: center; justify-content: center; transition: all 0.3s ease; }
+            .trake-scene-btn:hover { background: #c82333; border-color: #c82333; }
+            .trake-scene-btn.selected { background: #28a745; border-color: #28a745; }
+            .trake-scene-btn.selected:hover { background: #218838; border-color: #218838; }
+            .pr-list { max-height: 220px; overflow:auto; }
+            .pr-row { display:flex; align-items:center; gap:12px; padding:8px 12px;
+                      border-bottom:1px dashed #3a3a3a; cursor:pointer; user-select:none; }
+            .pr-row:last-child { border-bottom:none; }
+            .pr-index { width:34px; text-align:right; color:#ddd; opacity:.6; font-size:12px; }
+            .pr-value { color:#fff; font-size:14px; }
+            .pr-row.selected { background:#3a3a3a; outline:1px solid #17A2B8; }
+            .pr-empty { color:#ccc; opacity:.7; padding:12px; font-size:13px; }
+            
+            /* Sliders container below video inside video panel */
+            .sliders-container { margin-top: 20px; padding: 20px; background: #2e2e2e; border-radius: 8px; color: white; }
         </style>
+        <script src="https://unpkg.com/range-slider-input@2"></script>
     </head>
     <body>
         <div class="container">
-            <div class="info-panel">
-                <h4>Current Time:</h4>
-                <div class="time-display" id="current-time-{video_id}">{start_time:.1f}s</div>
-                
-                <h4>Current Frame:</h4>
-                <div class="frame-display" id="current-frame-{video_id}">{int(start_time * fps)}</div>
-                
-                <div class="status">
-                    <p><strong>Start Time:</strong> {start_time:.1f}s</p>
-                    <p><strong>Start Frame:</strong> {int(start_time * fps)}</p>
-                    <p><strong>FPS:</strong> {fps}</p>
-                    <p><strong>Status:</strong> <span id="status-{video_id}">Initializing...</span></p>
-                    <p><strong>Player State:</strong> <span id="player-state-{video_id}">Unknown</span></p>
-                    <div style="margin-top:10px;">
-                        <label for="goto-frame-{video_id}"><strong>Go to Frame:</strong></label>
-                        <input type="number" id="goto-frame-{video_id}" placeholder="Enter frame and press Enter" style="width: 100%; padding: 6px; border-radius: 4px; border: 1px solid #555; background:#2a2a2a; color:#fff;" />
-                    </div>
-                    <div style="margin-top:10px;">
-                        <div style="display:flex; justify-content:space-between;">
-                            <span id="frame-left-{video_id}"><strong>{int(start_time * fps)} F</strong></span>
-                            <span id="frame-right-{video_id}"><strong>-- F</strong></span>
-                        </div>
-                        <input type="range" id="seek-frame-{video_id}" min="0" max="{int(max(1, int(start_time * fps) + 1))}" step="1" value="{int(start_time * fps)}" style="width:100%;">
-                    </div>
-                </div>
-                
-                <div class="info-grid">
-                    <div class="info-item">
-                        <strong>Time Format:</strong><br>
-                        <span id="time-formatted-{video_id}">00:13:53</span>
-                    </div>
-                    <div class="info-item">
-                        <strong>Frame Rate:</strong><br>
-                        <span id="fps-display-{video_id}">{fps} fps</span>
-                    </div>
-                </div>
-                
-                
-            </div>
-            
             <div class="video-panel">
-                <h4>Video Player:</h4>
-                <iframe id="ytplayer-{video_id}" 
-                        src="https://www.youtube.com/embed/{video_id}?start={start_time}&enablejsapi=1"
+                <iframe id="ytplayer-<<video_id>>" 
+                        src="https://www.youtube.com/embed/<<video_id>>?start=<<start_time>>&enablejsapi=1"
                         frameborder="0" 
                         allowfullscreen>
                 </iframe>
+                
+                <!-- Sliders below video inside video panel -->
+                <div class="sliders-container">
+                    <!-- Top row: Add for buttons and Go to Frame -->
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                        <!-- TRAKE Scene selection buttons -->
+                        <div id="trake-scene-number-wrap-<<video_id>>" style="display:none;">
+                            <label style="font-size:12px; color:#ccc; margin-right:8px;">Add for:</label>
+                            <div id="trake-scene-buttons-<<video_id>>" style="display:inline-flex; gap:5px; margin-left:8px;">
+                                <!-- Dynamic scene buttons will be generated here -->
+                            </div>
+                        </div>
+                        
+                        <!-- Go to Frame input (visible for all tasks) -->
+                        <div style="display:flex; align-items:center; gap:8px; margin-left:auto;">
+                            <label for="goto-frame-<<video_id>>" style="font-size:12px; color:#ccc;"><strong>Go to Frame:</strong></label>
+                            <input type="number" id="goto-frame-<<video_id>>" placeholder="Enter frame and press Enter" style="width: 180px; height:28px; padding: 2px 6px; border-radius: 3px; border: 1px solid #777; background:#1f1f1f; color:#fff; font-size:11px;" />
+                    </div>
+                    </div>
+                    
+                    <div style="margin-top:10px;">
+                        <div style="display:flex; justify-content:space-between;">
+                            <span id="frame-left-<<video_id>>"><strong><<start_frame>> F</strong></span>
+                            <span id="frame-right-<<video_id>>"><strong>-- F</strong></span>
+                        </div>
+                        <input type="range" id="seek-frame-<<video_id>>" min="0" max="<<seek_max_init>>" step="1" value="<<start_frame>>" style="width:100%;">
+                        
+                        <!-- Add button for KIS/QA tasks -->
+                        <div id="add-single-wrap-<<video_id>>" style="display:none; margin-top:10px; text-align:center;">
+                            <button id="add-single-<<video_id>>" class="add-btn">Add</button>
+                    </div>
+                        
+                        <!-- TRAKE Add button -->
+                        <div id="trake-add-single-wrap-<<video_id>>" style="display:none; margin-top:10px; text-align:center;">
+                            <button id="trake-add-single-<<video_id>>" class="add-btn">Add</button>
+                </div>
+                
+                    <div style="margin-top:10px;">
+                            <div class="price-input" id="rs-inputs-<<video_id>>">
+                                <div class="field" style="flex: 1;">
+                                    <span>Min</span>
+                                    <input type="number" class="input-min" id="rs-input-min-<<video_id>>" value="<<start_frame>>">
+                                    <button class="current-btn" id="rs-min-current-<<video_id>>" title="Set Min to Current Frame">Current</button>
+                    </div>
+                                <div class="separator">-</div>
+                                <div class="field" style="flex: 1;">
+                                    <span>Max</span>
+                                    <input type="number" class="input-max" id="rs-input-max-<<video_id>>" value="<<start_frame_plus_1>>">
+                                    <button class="current-btn" id="rs-max-current-<<video_id>>" title="Set Max to Current Frame">Current</button>
+                    </div>
+                                <div class="step-controls">
+                                    <span class="step-label">Step:</span>
+                                    <input type="number" class="step-input" id="rs-step-size-<<video_id>>" value="5" min="1" max="100">
+                                    <button class="step-btn" id="rs-max-up-<<video_id>>" title="Tăng Max">▲</button>
+                                    <button class="step-btn" id="rs-max-down-<<video_id>>" title="Giảm Max">▼</button>
+                </div>
+                            </div>
+                            <div class="slider" id="rs-slider-<<video_id>>">
+                                <div class="progress" id="rs-progress-<<video_id>>"></div>
+                            </div>
+                            <div class="range-input">
+                                <input type="range" class="range-min" id="rs-range-min-<<video_id>>" min="0" max="<<seek_max_init>>" value="<<start_frame>>" step="1">
+                                <input type="range" class="range-max" id="rs-range-max-<<video_id>>" min="0" max="<<seek_max_init>>" value="<<start_frame>>" step="1">
+                            </div>
+                            <div class="rs-total"><strong id="rs-total-<<video_id>>">0</strong></div>
+                            
+                            <!-- Add Batch button for KIS/QA tasks -->
+                            <div id="add-batch-wrap-<<video_id>>" style="display:none; margin-top:10px; text-align:center;">
+                                <button id="add-batch-<<video_id>>" class="add-btn">Add Batch</button>
+                    </div>
+                            
+                            <!-- TRAKE Add Batch button -->
+                            <div id="trake-add-batch-wrap-<<video_id>>" style="display:none; margin-top:10px; text-align:center;">
+                                <button id="trake-add-batch-<<video_id>>" class="add-btn">Add Batch</button>
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+            </div>
+            
+            <div class="info-panel">
+                <h4>Current Time:</h4>
+                 <div class="time-display" id="current-time-<<video_id>>">00:00:00</div>
+                
+                <h4>Current Frame:</h4>
+                <div class="frame-display" id="current-frame-<<video_id>>"><<start_frame>></div>
+                
+                <div class="status">
+                     <p><strong>Start Time:</strong> <span id="start-time-display-<<video_id>>">00:00</span></p>
+                    <p><strong>Start Frame:</strong> <<start_frame>></p>
+                    <p><strong>FPS:</strong> <<fps>></p>
+                    <p><strong>Status:</strong> <span id="status-<<video_id>>">Initializing...</span></p>
+                    <p><strong>Player State:</strong> <span id="player-state-<<video_id>>">Unknown</span></p>
+            
+                    <!-- Top row: Câu hỏi + Task (+ QA / Scenes) -->
+                    <div class="top-form" id="qa-form-<<video_id>>">
+                        <div class="form-group">
+                            <label for="question-count-<<video_id>>">Câu hỏi:</label>
+                            <input type="number" id="question-count-<<video_id>>" min="1" placeholder="Nhập số câu hỏi">
+                        </div>
+                        <div class="form-group">
+                            <label for="task-select-<<video_id>>">Task:</label>
+                            <select id="task-select-<<video_id>>">
+                                <option value="KIS">KIS</option>
+                                <option value="QA">QA</option>
+                                <option value="TRAKE">TRAKE</option>
+                            </select>
+                    </div>
+                        <div class="form-group" id="qa-answer-wrap-<<video_id>>" style="display:none;">
+                            <label for="qa-answer-<<video_id>>">Đáp án QA:</label>
+                            <input type="text" id="qa-answer-<<video_id>>" placeholder="Nhập đáp án">
+                </div>
+                        <div class="form-group" id="trake-scenes-wrap-<<video_id>>" style="display:none;">
+                            <label for="trake-scenes-<<video_id>>">Scenes:</label>
+                            <input type="number" id="trake-scenes-<<video_id>>" min="1" max="10" placeholder="Nhập số cảnh" style="width:40px; height:40px; text-align:center;">
+                            <div id="trake-scene-inputs-<<video_id>>" style="margin-top:10px;"></div>
+                            <div style="text-align:right; margin-top:20px;">
+                                <button id="trake-confirm-<<video_id>>" class="trake-confirm-btn" style="display:none;">Confirm</button>
+                                <div id="trake-success-notification-<<video_id>>" class="notification" style="position:relative; top:auto; left:auto; right:auto; margin-top:10px; text-align:center;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+            
+        <!-- Save CSV button above Preview Result -->
+        <div style="text-align:right; margin:1px 0; padding:1px 0; position:relative;">
+            <button id="save-csv-<<video_id>>" class="save-csv-btn">Save CSV</button>
+            <div id="save-csv-notification-<<video_id>>" class="notification" style="position:absolute; top:100%; right:0; left:auto; margin-top:5px; text-align:right; max-width:300px;"></div>
+        </div>
+        
+        <!-- Preview Result (outside the main container) -->
+        <div class="preview-wrapper">
+            <div class="preview-card" id="preview-card-<<video_id>>">
+                <div class="preview-header">
+                    <div><strong>Preview Result</strong></div>
+                    <div class="preview-controls">
+                        <div class="preview-hint">Chọn dòng rồi nhấn <kbd>Delete</kbd> để xóa</div>
+                        <div class="delete-range-controls">
+                            <span>Delete range:</span>
+                            <input type="number" id="delete-from-<<video_id>>" placeholder="From" min="1" style="width:60px; margin:0 5px;">
+                            <span>-</span>
+                            <input type="number" id="delete-to-<<video_id>>" placeholder="To" min="1" style="width:60px; margin:0 5px;">
+                            <button id="delete-range-btn-<<video_id>>" class="delete-range-btn">Delete</button>
+                            <div id="notification-<<video_id>>" class="notification"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="pr-list" id="pr-list-<<video_id>>"></div>
+                <div class="pr-empty" id="pr-empty-<<video_id>>" style="display:none;">(Trống)</div>
             </div>
         </div>
 
         <script>
-            var player_{video_id.replace('-', '_')};
-            var timeUpdateInterval_{video_id.replace('-', '_')};
-            var debugCount_{video_id.replace('-', '_')} = 0;
-            var fps = {fps};
-            var startTime = {start_time};
-            
-            // Load YouTube API
-            var tag = document.createElement('script');
-            tag.src = "https://www.youtube.com/iframe_api";
-            var firstScriptTag = document.getElementsByTagName('script')[0];
-            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-            
-            function addDebugLog_{video_id.replace('-', '_')}(message) {{
-                debugCount_{video_id.replace('-', '_')}++;
-                var debugEl = document.getElementById('debug-log-{video_id}');
-                var timestamp = new Date().toLocaleTimeString();
-                if (debugEl) {{
-                    debugEl.innerHTML += `<div>[${{timestamp}}] ${{debugCount_{video_id.replace('-', '_')}}}: ${{message}}</div>`;
-                }}
-                console.log(`[${{timestamp}}] ${{message}}`);
-            }}
-            
-            function formatTime(seconds) {{
-                var hours = Math.floor(seconds / 3600);
-                var minutes = Math.floor((seconds % 3600) / 60);
-                var secs = Math.floor(seconds % 60);
-                return `${{hours.toString().padStart(2, '0')}}:${{minutes.toString().padStart(2, '0')}}:${{secs.toString().padStart(2, '0')}}`;
-            }}
-            
-            function calculateFrame(timeInSeconds) {{
-                return Math.floor(timeInSeconds * fps);
-            }}
-            
-            function updateTimeAndFrame_{video_id.replace('-', '_')}() {{
-                if (player_{video_id.replace('-', '_')} && typeof player_{video_id.replace('-', '_')}.getCurrentTime === 'function') {{
-                    try {{
-                        var currentTime = player_{video_id.replace('-', '_')}.getCurrentTime();
-                        var currentFrame = calculateFrame(currentTime);
-                        var formattedTime = formatTime(currentTime);
-                        
-                        addDebugLog_{video_id.replace('-', '_')}(`Time: ${{currentTime.toFixed(2)}}s, Frame: ${{currentFrame}}`);
-                        
-                        // Update time display
-                        var timeEl = document.getElementById('current-time-{video_id}');
-                        if (timeEl && currentTime !== undefined) {{
-                            timeEl.textContent = currentTime.toFixed(1) + 's';
-                        }}
-                        
-                        // Update frame display
-                        var frameEl = document.getElementById('current-frame-{video_id}');
-                        if (frameEl) {{
-                            frameEl.textContent = currentFrame;
-                        }}
-                        
-                        // Update formatted time
-                        var formattedEl = document.getElementById('time-formatted-{video_id}');
-                        if (formattedEl) {{
-                            formattedEl.textContent = formattedTime;
-                        }}
-                        // Sync frame slider while not dragging
-                        var frameSlider = document.getElementById('seek-frame-{video_id}');
-                        var frameLeft = document.getElementById('frame-left-{video_id}');
-                        if (frameSlider && !window._seeking_{video_id.replace('-', '_')}) {{
-                            frameSlider.value = currentFrame;
-                            if (frameLeft) frameLeft.innerHTML = '<strong>' + currentFrame + ' F</strong>';
-                        }}
-                        
-                    }} catch (e) {{
-                        addDebugLog_{video_id.replace('-', '_')}(`Error getting current time: ${{e.message}}`);
-                    }}
-                }} else {{
-                    addDebugLog_{video_id.replace('-', '_')}('Player not ready or getCurrentTime not available');
-                }}
-            }}
+            var player_<<vid_us>>, timeUpdateInterval_<<vid_us>>, debugCount_<<vid_us>>=0;
+            var fps = <<fps>>, startTime = <<start_time>>;
 
-            // Handle Go to Frame input (seek on Enter)
-            document.addEventListener('DOMContentLoaded', function() {{
-                var input = document.getElementById('goto-frame-{video_id}');
-                if (input) {{
-                    input.addEventListener('keydown', function(e) {{
-                        if (e.key === 'Enter') {{
-                            var f = parseInt(input.value, 10);
-                            if (!isNaN(f) && f >= 0) {{
-                                var t = f / fps;
-                                addDebugLog_{video_id.replace('-', '_')}('Seeking to frame ' + f + ' (t=' + t.toFixed(2) + 's)');
-                                if (player_{video_id.replace('-', '_')} && typeof player_{video_id.replace('-', '_')}.seekTo === 'function') {{
-                                    try {{
-                                        player_{video_id.replace('-', '_')}.seekTo(t, true);
-                                    }} catch (err) {{
-                                        addDebugLog_{video_id.replace('-', '_')}('Seek error: ' + err.message);
-                                    }}
-                                }} else {{
-                                    addDebugLog_{video_id.replace('-', '_')}('Seek unavailable: player not ready');
-                                }}
-                            }} else {{
-                                addDebugLog_{video_id.replace('-', '_')}('Invalid frame input');
-                            }}
-                        }}
-                    }});
-                }}
-                // Setup frame slider handlers
-                window._seeking_{video_id.replace('-', '_')} = false;
-                var frameSlider = document.getElementById('seek-frame-{video_id}');
-                var frameLeft = document.getElementById('frame-left-{video_id}');
-                if (frameSlider) {{
-                    frameSlider.addEventListener('input', function() {{
-                        window._seeking_{video_id.replace('-', '_')} = true;
-                        var f = parseInt(frameSlider.value, 10) || 0;
-                        if (frameLeft) frameLeft.innerHTML = '<strong>' + f + ' F</strong>';
-                    }});
-                    frameSlider.addEventListener('change', function() {{
-                        var f = parseInt(frameSlider.value, 10) || 0;
-                        var t = f / fps;
-                        addDebugLog_{video_id.replace('-', '_')}('Seeking to frame ' + f + ' (t=' + t.toFixed(2) + 's) via slider');
-                        if (player_{video_id.replace('-', '_')} && typeof player_{video_id.replace('-', '_')}.seekTo === 'function') {{
-                            try {{ player_{video_id.replace('-', '_')}.seekTo(t, true); }} catch(err) {{ addDebugLog_{video_id.replace('-', '_')}('Seek error: ' + err.message); }}
-                        }}
-                        window._seeking_{video_id.replace('-', '_')} = false;
-                    }});
-                    frameSlider.addEventListener('mousedown', function() {{ window._seeking_{video_id.replace('-', '_')} = true; }});
-                    frameSlider.addEventListener('mouseup', function() {{ window._seeking_{video_id.replace('-', '_')} = false; }});
-                }}
-            }});
-            
-            function onYouTubeIframeAPIReady() {{
-                addDebugLog_{video_id.replace('-', '_')}('YouTube API ready, initializing player');
+            /* ===== FIX bổ sung bằng JS: nếu host vẫn ép overflow hidden, ta bật lại ===== */
+            (function ensureScrollable(){
+                try {
+                    document.documentElement.style.overflowY = 'auto';
+                    document.body.style.overflowY = 'auto';
+                } catch(_){}
+            })();
+
+            // --- Preview data & helpers ---
+            var previewData_<<vid_us>> = [];
+            function renderPreview_<<vid_us>>() {
+                var list = document.getElementById('pr-list-<<video_id>>');
+                if (!list) return;
+                list.innerHTML = '';
+                previewData_<<vid_us>>.forEach(function(val, idx){
+                    var row = document.createElement('div');
+                    row.className = 'pr-row'; row.tabIndex = 0; row.dataset.index = idx;
+                    row.innerHTML = '<div class="pr-index">'+String(idx+1).padStart(2,"0")+'</div><div class="pr-value">'+val+'</div>';
+                    row.addEventListener('click', function(e){
+                        if (!e.ctrlKey && !e.metaKey) {
+                            document.querySelectorAll('#pr-list-<<video_id>> .pr-row.selected').forEach(function(r){ r.classList.remove('selected'); });
+                        }
+                        row.classList.toggle('selected'); row.focus();
+                    });
+                    list.appendChild(row);
+                });
+                var empty = document.getElementById('pr-empty-<<video_id>>');
+                if (empty) empty.style.display = previewData_<<vid_us>>.length ? 'none' : 'block';
+            }
+            function deleteSelectedPreviewRows_<<vid_us>>() {
+                var list = document.getElementById('pr-list-<<video_id>>');
+                if (!list) return;
+                var selected = Array.from(list.querySelectorAll('.pr-row.selected'));
+                if (!selected.length) {
+                    showNotification_<<vid_us>>('Vui lòng chọn dòng cần xóa', true);
+                    return;
+                }
+                var idxs = selected.map(function(el){ return parseInt(el.dataset.index); }).sort(function(a,b){ return b-a; });
+                var count = idxs.length;
+                idxs.forEach(function(i){ if (i>=0 && i<previewData_<<vid_us>>.length) previewData_<<vid_us>>.splice(i,1); });
+                renderPreview_<<vid_us>>();
+                showNotification_<<vid_us>>('Đã xóa ' + count + ' dòng được chọn');
+            }
+            function showNotification_<<vid_us>>(message, isError = false) {
+                var notification = document.getElementById('notification-<<video_id>>');
+                if (!notification) return;
                 
-                player_{video_id.replace('-', '_')} = new YT.Player('ytplayer-{video_id}', {{
-                    events: {{
-                        'onReady': onPlayerReady_{video_id.replace('-', '_')},
-                        'onStateChange': onPlayerStateChange_{video_id.replace('-', '_')}
-                    }}
-                }});
-            }}
-            
-            function onPlayerReady_{video_id.replace('-', '_')}(event) {{
-                addDebugLog_{video_id.replace('-', '_')}('Player ready, starting time updates');
-                document.getElementById('status-{video_id}').textContent = 'Player Ready';
-                try {{
-                    var dur = player_{video_id.replace('-', '_')}.getDuration ? player_{video_id.replace('-', '_')}.getDuration() : null;
-                    var frameSlider = document.getElementById('seek-frame-{video_id}');
-                    var frameRight = document.getElementById('frame-right-{video_id}');
-                    if (frameSlider && dur && isFinite(dur) && dur > 0) {{
-                        var maxF = Math.floor(dur * fps);
-                        frameSlider.max = maxF;
-                        if (frameRight) frameRight.innerHTML = '<strong>' + maxF + ' F</strong>';
-                    }}
-                }} catch(_e) {{}}
-                startTimeUpdates_{video_id.replace('-', '_')}();
-            }}
-            
-            function onPlayerStateChange_{video_id.replace('-', '_')}(event) {{
-                var stateNames = {{
-                    0: 'Ended',
-                    1: 'Playing', 
-                    2: 'Paused',
-                    3: 'Buffering',
-                    5: 'Cued'
-                }};
-                var stateName = stateNames[event.data] || 'Unknown';
-                addDebugLog_{video_id.replace('-', '_')}(`Player state changed to: ${{event.data}} (${{stateName}})`);
-                document.getElementById('player-state-{video_id}').textContent = stateName;
-                updateTimeAndFrame_{video_id.replace('-', '_')}();
-            }}
-            
-            function startTimeUpdates_{video_id.replace('-', '_')}() {{
-                if (timeUpdateInterval_{video_id.replace('-', '_')}) {{
-                    clearInterval(timeUpdateInterval_{video_id.replace('-', '_')});
-                }}
+                notification.textContent = message;
+                notification.className = 'notification' + (isError ? ' error' : '');
                 
-                timeUpdateInterval_{video_id.replace('-', '_')} = setInterval(function() {{
-                    updateTimeAndFrame_{video_id.replace('-', '_')}();
-                }}, 200); // Update every 200ms for smooth frame updates
-            }}
-            
-            // Fallback initialization
-            setTimeout(function() {{
-                if (!player_{video_id.replace('-', '_')} && typeof YT !== 'undefined' && YT.Player) {{
-                    addDebugLog_{video_id.replace('-', '_')}('Fallback initialization triggered');
-                    onYouTubeIframeAPIReady();
-                }} else if (!player_{video_id.replace('-', '_')}) {{
-                    addDebugLog_{video_id.replace('-', '_')}('Fallback failed - YT API still not ready');
-                }}
-            }}, 3000);
-            
-            addDebugLog_{video_id.replace('-', '_')}('Page loaded, waiting for YouTube API...');
+                // Show notification
+                notification.classList.add('show');
+                
+                // Hide after 3 seconds
+                setTimeout(function() {
+                    notification.classList.remove('show');
+                }, 3000);
+            }
+            function deleteRangePreviewRows_<<vid_us>>() {
+                var fromInput = document.getElementById('delete-from-<<video_id>>');
+                var toInput = document.getElementById('delete-to-<<video_id>>');
+                if (!fromInput || !toInput) return;
+                
+                var from = parseInt(fromInput.value);
+                var to = parseInt(toInput.value);
+                
+                // Check if range inputs are empty - if so, delete selected elements
+                if (isNaN(from) && isNaN(to)) {
+                    var list = document.getElementById('pr-list-<<video_id>>');
+                    if (!list) return;
+                    var selected = Array.from(list.querySelectorAll('.pr-row.selected'));
+                    if (!selected.length) {
+                        showNotification_<<vid_us>>('Vui lòng chọn dòng cần xóa hoặc nhập khoảng xóa', true);
+                        return;
+                    }
+                    var idxs = selected.map(function(el){ return parseInt(el.dataset.index); }).sort(function(a,b){ return b-a; });
+                    var count = idxs.length;
+                    idxs.forEach(function(i){ if (i>=0 && i<previewData_<<vid_us>>.length) previewData_<<vid_us>>.splice(i,1); });
+                    renderPreview_<<vid_us>>();
+                    showNotification_<<vid_us>>('Đã xóa ' + count + ' dòng được chọn');
+                    return;
+                }
+                
+                // Range deletion logic
+                if (isNaN(from) || isNaN(to)) {
+                    showNotification_<<vid_us>>('Vui lòng nhập số thứ tự hợp lệ', true);
+                    return;
+                }
+                
+                if (from < 1 || to < 1) {
+                    showNotification_<<vid_us>>('Số thứ tự phải lớn hơn 0', true);
+                    return;
+                }
+                
+                if (from > to) {
+                    showNotification_<<vid_us>>('Số thứ tự "From" phải nhỏ hơn hoặc bằng "To"', true);
+                    return;
+                }
+                
+                if (from > previewData_<<vid_us>>.length || to > previewData_<<vid_us>>.length) {
+                    showNotification_<<vid_us>>('Số thứ tự vượt quá số dòng hiện có (' + previewData_<<vid_us>>.length + ')', true);
+                    return;
+                }
+                
+                // Convert to 0-based indices
+                var startIdx = from - 1;
+                var endIdx = to - 1;
+                var count = endIdx - startIdx + 1;
+                
+                // Delete from end to start to maintain indices
+                for (var i = endIdx; i >= startIdx; i--) {
+                    previewData_<<vid_us>>.splice(i, 1);
+                }
+                
+                // Clear inputs
+                fromInput.value = '';
+                toInput.value = '';
+                
+                renderPreview_<<vid_us>>();
+                showNotification_<<vid_us>>('Đã xóa ' + count + ' dòng từ ' + from + ' đến ' + to);
+            }
+            function isInputLike_<<vid_us>>(el){
+                if (!el) return false; var tag=(el.tagName||'').toUpperCase();
+                return el.isContentEditable || tag==='INPUT' || tag==='TEXTAREA' || tag==='SELECT';
+            }
+            document.addEventListener('keydown', function(e){
+                if (e.key==='Delete' && !isInputLike_<<vid_us>>(document.activeElement)) {
+                    if (document.querySelector('#pr-list-<<video_id>> .pr-row.selected')) { e.preventDefault(); deleteSelectedPreviewRows_<<vid_us>>(); }
+                }
+            });
+
+            // YouTube API
+            var tag=document.createElement('script'); tag.src="https://www.youtube.com/iframe_api";
+            document.getElementsByTagName('script')[0].parentNode.insertBefore(tag, document.getElementsByTagName('script')[0]);
+            function formatTime(s){var h=Math.floor(s/3600),m=Math.floor((s%3600)/60),c=Math.floor(s%60);return`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(c).padStart(2,'0')}`;}
+            function formatTimeMMSS(s){var m=Math.floor(s/60),c=Math.floor(s%60);return`${String(m).padStart(2,'0')}:${String(c).padStart(2,'0')}`;}
+            function formatTimeMMSSFF(s,fps){var m=Math.floor(s/60),c=Math.floor(s%60),f=Math.floor((s%1)*fps);return`${String(m).padStart(2,'0')}:${String(c).padStart(2,'0')}:${String(f).padStart(2,'0')}`;}
+            function calculateFrame(t){return Math.floor(t*fps);}
+            function updateTimeAndFrame_<<vid_us>>(){
+                if (player_<<vid_us>> && typeof player_<<vid_us>>.getCurrentTime==='function'){
+                    try{
+                        var currentTime=player_<<vid_us>>.getCurrentTime(), currentFrame=calculateFrame(currentTime);
+                        var timeEl=document.getElementById('current-time-<<video_id>>'); if (timeEl) timeEl.textContent=formatTimeMMSSFF(currentTime,fps);
+                        var frameEl=document.getElementById('current-frame-<<video_id>>'); if (frameEl) frameEl.textContent=currentFrame;
+                        var frameSlider=document.getElementById('seek-frame-<<video_id>>'); var frameLeft=document.getElementById('frame-left-<<video_id>>');
+                        if (frameSlider && !window._seeking_<<vid_us>>) { frameSlider.value=currentFrame; if (frameLeft) frameLeft.innerHTML='<strong>'+currentFrame+' F</strong>'; }
+                    }catch(_){}
+                }
+            }
+
+            document.addEventListener('DOMContentLoaded', function(){
+                renderPreview_<<vid_us>>(); // render preview ngay khi DOM sẵn sàng
+                
+                // Initialize start time display
+                var startTimeEl = document.getElementById('start-time-display-<<video_id>>');
+                if (startTimeEl) startTimeEl.textContent = formatTimeMMSS(startTime);
+
+                var input=document.getElementById('goto-frame-<<video_id>>');
+                if (input){
+                    input.addEventListener('keydown',function(e){
+                        if(e.key==='Enter'){ var f=parseInt(input.value,10); if(!isNaN(f)&&f>=0){ var t=f/fps; try{ player_<<vid_us>>.seekTo(t,true);}catch(_){}}}
+                    });
+                }
+
+                // Toggle theo Task
+                var taskSel=document.getElementById('task-select-<<video_id>>');
+                var qaWrap=document.getElementById('qa-answer-wrap-<<video_id>>');
+                var scenesWrap=document.getElementById('trake-scenes-wrap-<<video_id>>');
+                var addSingleWrap=document.getElementById('add-single-wrap-<<video_id>>');
+                var addBatchWrap=document.getElementById('add-batch-wrap-<<video_id>>');
+                var trakeAddSingleWrap=document.getElementById('trake-add-single-wrap-<<video_id>>');
+                var trakeAddBatchWrap=document.getElementById('trake-add-batch-wrap-<<video_id>>');
+                var trakeSceneNumberWrap=document.getElementById('trake-scene-number-wrap-<<video_id>>');
+                var trakeSceneButtons=document.getElementById('trake-scene-buttons-<<video_id>>');
+                var trakeSceneInputs=document.getElementById('trake-scene-inputs-<<video_id>>');
+                var trakeConfirmBtn=document.getElementById('trake-confirm-<<video_id>>');
+                var trakeScenesInput=document.getElementById('trake-scenes-<<video_id>>');
+                var trakeSuccessNotification=document.getElementById('trake-success-notification-<<video_id>>');
+                var selectedSceneNum = 1; // Track currently selected scene
+                
+                function updateTaskConditional(){
+                    if (qaWrap)    qaWrap.style.display     = (taskSel && taskSel.value==='QA')   ? 'flex' : 'none';
+                    if (scenesWrap)scenesWrap.style.display = (taskSel && taskSel.value==='TRAKE') ? 'flex' : 'none';
+                    var showAddButtons = (taskSel && (taskSel.value==='KIS' || taskSel.value==='QA'));
+                    var showTrakeButtons = (taskSel && taskSel.value==='TRAKE');
+                    if (addSingleWrap) addSingleWrap.style.display = showAddButtons ? 'block' : 'none';
+                    if (addBatchWrap) addBatchWrap.style.display = showAddButtons ? 'block' : 'none';
+                    if (trakeAddSingleWrap) trakeAddSingleWrap.style.display = showTrakeButtons ? 'block' : 'none';
+                    if (trakeAddBatchWrap) trakeAddBatchWrap.style.display = showTrakeButtons ? 'block' : 'none';
+                    if (trakeSceneNumberWrap) trakeSceneNumberWrap.style.display = showTrakeButtons ? 'block' : 'none';
+                    // Go to Frame is always visible for all tasks
+                }
+                if (taskSel){ taskSel.addEventListener('change', updateTaskConditional); updateTaskConditional(); }
+
+                // Add button event listeners
+                var addSingleBtn=document.getElementById('add-single-<<video_id>>');
+                var addBatchBtn=document.getElementById('add-batch-<<video_id>>');
+                var qaAnswerInput=document.getElementById('qa-answer-<<video_id>>');
+                
+                function addSingleFrame(){
+                    if (previewData_<<vid_us>>.length >= 100) {
+                        alert('Preview Result đã đạt giới hạn 100 dòng. Vui lòng xóa bớt trước khi thêm mới.');
+                        return;
+                    }
+                    var currentFrame = Math.round(player_<<vid_us>>.getCurrentTime() * fps);
+                    var videoName = '<<video_name>>';
+                    var taskValue = taskSel ? taskSel.value : '';
+                    
+                    if (taskValue === 'KIS') {
+                        previewData_<<vid_us>>.push(videoName + ', ' + currentFrame);
+                    } else if (taskValue === 'QA') {
+                        var answer = qaAnswerInput ? qaAnswerInput.value.trim() : '';
+                        if (!answer) {
+                            alert('Vui lòng nhập đáp án QA trước khi thêm frame.');
+                            return;
+                        }
+                        previewData_<<vid_us>>.push(videoName + ', ' + currentFrame + ', "' + answer + '"');
+                    }
+                    renderPreview_<<vid_us>>();
+                }
+                
+                function addBatchFrames(){
+                    var minFrame = parseInt(document.getElementById('rs-input-min-<<video_id>>').value) || 0;
+                    var maxFrame = parseInt(document.getElementById('rs-input-max-<<video_id>>').value) || 0;
+                    var videoName = '<<video_name>>';
+                    var taskValue = taskSel ? taskSel.value : '';
+                    
+                    if (taskValue === 'QA') {
+                        var answer = qaAnswerInput ? qaAnswerInput.value.trim() : '';
+                        if (!answer) {
+                            alert('Vui lòng nhập đáp án QA trước khi thêm batch.');
+                            return;
+                        }
+                    }
+                    
+                    var framesToAdd = [];
+                    for (var frame = minFrame; frame <= maxFrame; frame++) {
+                        if (previewData_<<vid_us>>.length + framesToAdd.length >= 100) {
+                            alert('Sẽ vượt quá giới hạn 100 dòng. Chỉ thêm được ' + framesToAdd.length + ' frame.');
+                            break;
+                        }
+                        if (taskValue === 'KIS') {
+                            framesToAdd.push(videoName + ', ' + frame);
+                        } else if (taskValue === 'QA') {
+                            framesToAdd.push(videoName + ', ' + frame + ', "' + answer + '"');
+                        }
+                    }
+                    
+                    previewData_<<vid_us>>.push.apply(previewData_<<vid_us>>, framesToAdd);
+                    renderPreview_<<vid_us>>();
+                }
+                
+                if (addSingleBtn) addSingleBtn.addEventListener('click', addSingleFrame);
+                if (addBatchBtn) addBatchBtn.addEventListener('click', addBatchFrames);
+
+                // TRAKE functions
+                function addTrakeSingle() {
+                    var currentFrame = Math.round(player_<<vid_us>>.getCurrentTime() * fps);
+                    var input = document.getElementById('trake-scene-' + selectedSceneNum + '-<<video_id>>');
+                    if (input) {
+                        input.value = currentFrame;
+                        // Update button color to green (selected)
+                        var button = document.getElementById('trake-scene-btn-' + selectedSceneNum + '-<<video_id>>');
+                        if (button) {
+                            button.classList.add('selected');
+                        }
+                        // Auto-advance to next scene
+                        autoAdvanceToNextScene();
+                    } else {
+                        showNotification_<<vid_us>>('Scene ' + selectedSceneNum + ' không tồn tại', true);
+                    }
+                }
+                
+                function addTrakeBatch() {
+                    var minFrame = parseInt(document.getElementById('rs-input-min-<<video_id>>').value) || 0;
+                    var maxFrame = parseInt(document.getElementById('rs-input-max-<<video_id>>').value) || 0;
+                    var input = document.getElementById('trake-scene-' + selectedSceneNum + '-<<video_id>>');
+                    if (input) {
+                        input.value = '[' + minFrame + ',' + maxFrame + ']';
+                        // Update button color to green (selected)
+                        var button = document.getElementById('trake-scene-btn-' + selectedSceneNum + '-<<video_id>>');
+                        if (button) {
+                            button.classList.add('selected');
+                        }
+                        // Auto-advance to next scene
+                        autoAdvanceToNextScene();
+                    } else {
+                        showNotification_<<vid_us>>('Scene ' + selectedSceneNum + ' không tồn tại', true);
+                    }
+                }
+                
+                function autoAdvanceToNextScene() {
+                    // Find next available scene
+                    var allButtons = trakeSceneButtons.querySelectorAll('.trake-scene-btn');
+                    var nextSceneNum = selectedSceneNum + 1;
+                    
+                    // Check if next scene exists
+                    if (nextSceneNum <= allButtons.length) {
+                        // Remove selected class from current button
+                        var currentButton = document.getElementById('trake-scene-btn-' + selectedSceneNum + '-<<video_id>>');
+                        if (currentButton) {
+                            currentButton.classList.remove('selected');
+                        }
+                        
+                        // Select next scene
+                        var nextButton = document.getElementById('trake-scene-btn-' + nextSceneNum + '-<<video_id>>');
+                        if (nextButton) {
+                            nextButton.classList.add('selected');
+                            selectedSceneNum = nextSceneNum;
+                        }
+                    }
+                }
+                
+                function createTrakeSceneButtons(numScenes) {
+                    if (!trakeSceneButtons) return;
+                    trakeSceneButtons.innerHTML = '';
+                    for (var i = 1; i <= numScenes; i++) {
+                        var button = document.createElement('button');
+                        button.className = 'trake-scene-btn';
+                        button.id = 'trake-scene-btn-' + i + '-<<video_id>>';
+                        button.textContent = i;
+                        button.addEventListener('click', function(sceneNum) {
+                            return function() {
+                                // Remove selected class from all buttons
+                                var allButtons = trakeSceneButtons.querySelectorAll('.trake-scene-btn');
+                                allButtons.forEach(function(btn) {
+                                    btn.classList.remove('selected');
+                                });
+                                // Add selected class to clicked button
+                                this.classList.add('selected');
+                                selectedSceneNum = sceneNum;
+                            };
+                        }(i));
+                        trakeSceneButtons.appendChild(button);
+                    }
+                    // Select first button by default
+                    if (numScenes > 0) {
+                        var firstButton = document.getElementById('trake-scene-btn-1-<<video_id>>');
+                        if (firstButton) {
+                            firstButton.classList.add('selected');
+                            selectedSceneNum = 1;
+                        }
+                    }
+                }
+                
+                function createTrakeSceneInputs(numScenes) {
+                    if (!trakeSceneInputs) return;
+                    trakeSceneInputs.innerHTML = '';
+                    for (var i = 1; i <= numScenes; i++) {
+                        var div = document.createElement('div');
+                        div.className = 'trake-scene-input';
+                        div.innerHTML = '<label>Scene ' + i + ':</label><input type="text" id="trake-scene-' + i + '-<<video_id>>" placeholder="Frame hoặc [start,end]">';
+                        trakeSceneInputs.appendChild(div);
+                    }
+                    if (trakeConfirmBtn) trakeConfirmBtn.style.display = 'block';
+                }
+                
+                function showTrakeSuccessNotification(message, isError = false) {
+                    if (!trakeSuccessNotification) return;
+                    trakeSuccessNotification.textContent = message;
+                    if (isError) {
+                        trakeSuccessNotification.classList.add('error');
+                    } else {
+                        trakeSuccessNotification.classList.remove('error');
+                    }
+                    trakeSuccessNotification.classList.add('show');
+                    setTimeout(function() {
+                        trakeSuccessNotification.classList.remove('show');
+                    }, 3000);
+                }
+                
+                function generateTrakeCombinations() {
+                    var combinations = [];
+                    var sceneInputs = trakeSceneInputs.querySelectorAll('.trake-scene-input input');
+                    var videoName = '<<video_name>>';
+                    
+                    // Parse each scene input
+                    var sceneData = [];
+                    for (var i = 0; i < sceneInputs.length; i++) {
+                        var value = sceneInputs[i].value.trim();
+                        if (!value) {
+                            showTrakeSuccessNotification('Vui lòng nhập đầy đủ tất cả các scene', true);
+                            return;
+                        }
+                        
+                        var frames = [];
+                        if (value.startsWith('[') && value.endsWith(']')) {
+                            // Range format [start,end]
+                            var range = value.slice(1, -1).split(',');
+                            if (range.length !== 2) {
+                                showTrakeSuccessNotification('Format range không đúng. Sử dụng [start,end]', true);
+                                return;
+                            }
+                            var start = parseInt(range[0]);
+                            var end = parseInt(range[1]);
+                            if (isNaN(start) || isNaN(end) || start > end) {
+                                showTrakeSuccessNotification('Range không hợp lệ', true);
+                                return;
+                            }
+                            for (var frame = start; frame <= end; frame++) {
+                                frames.push(frame);
+                            }
+                        } else {
+                            // Single frame
+                            var frame = parseInt(value);
+                            if (isNaN(frame)) {
+                                showTrakeSuccessNotification('Frame không hợp lệ: ' + value, true);
+                                return;
+                            }
+                            frames.push(frame);
+                        }
+                        sceneData.push(frames);
+                    }
+                    
+                    // Generate all combinations
+                    function generateCombos(scenes, currentCombo, index) {
+                        if (index === scenes.length) {
+                            combinations.push([videoName].concat(currentCombo));
+                            return;
+                        }
+                        for (var i = 0; i < scenes[index].length; i++) {
+                            generateCombos(scenes, currentCombo.concat(scenes[index][i]), index + 1);
+                        }
+                    }
+                    
+                    generateCombos(sceneData, [], 0);
+                    
+                    // Check limit and show notification if exceeded
+                    if (previewData_<<vid_us>>.length + combinations.length > 100) {
+                        showTrakeSuccessNotification('Sẽ vượt quá giới hạn 100 dòng! Chỉ thêm được ' + (100 - previewData_<<vid_us>>.length) + ' combinations. Vui lòng xóa bớt dữ liệu trước khi thêm.', true);
+                        return;
+                    }
+                    
+                    // Add to preview data
+                    var formattedCombinations = combinations.map(function(combo) {
+                        return combo.join(', ');
+                    });
+                    previewData_<<vid_us>>.push.apply(previewData_<<vid_us>>, formattedCombinations);
+                    renderPreview_<<vid_us>>();
+                    showTrakeSuccessNotification('Đã thêm ' + combinations.length + ' combinations thành công!');
+                }
+                
+                // Event listeners
+                if (trakeScenesInput) {
+                    trakeScenesInput.addEventListener('input', function() {
+                        var numScenes = parseInt(this.value);
+                        if (numScenes > 0 && numScenes <= 10) {
+                            createTrakeSceneInputs(numScenes);
+                            createTrakeSceneButtons(numScenes);
+                        } else {
+                            if (trakeSceneInputs) trakeSceneInputs.innerHTML = '';
+                            if (trakeSceneButtons) trakeSceneButtons.innerHTML = '';
+                            if (trakeConfirmBtn) trakeConfirmBtn.style.display = 'none';
+                        }
+                    });
+                }
+                
+                if (trakeConfirmBtn) {
+                    trakeConfirmBtn.addEventListener('click', generateTrakeCombinations);
+                }
+                
+                // TRAKE Add/Add Batch button event listeners
+                var trakeAddSingleBtn = document.getElementById('trake-add-single-<<video_id>>');
+                var trakeAddBatchBtn = document.getElementById('trake-add-batch-<<video_id>>');
+                if (trakeAddSingleBtn) trakeAddSingleBtn.addEventListener('click', addTrakeSingle);
+                if (trakeAddBatchBtn) trakeAddBatchBtn.addEventListener('click', addTrakeBatch);
+
+                // Delete range button event listener
+                var deleteRangeBtn = document.getElementById('delete-range-btn-<<video_id>>');
+                if (deleteRangeBtn) {
+                    deleteRangeBtn.addEventListener('click', deleteRangePreviewRows_<<vid_us>>);
+                }
+
+                // Save CSV button event listener
+                var saveCsvBtn = document.getElementById('save-csv-<<video_id>>');
+                var saveCsvNotification = document.getElementById('save-csv-notification-<<video_id>>');
+                
+                function showSaveNotification(message, isError = false) {
+                    if (!saveCsvNotification) return;
+                    saveCsvNotification.textContent = message;
+                    if (isError) {
+                        saveCsvNotification.classList.add('error');
+                    } else {
+                        saveCsvNotification.classList.remove('error');
+                    }
+                    saveCsvNotification.classList.add('show');
+                    setTimeout(function() {
+                        saveCsvNotification.classList.remove('show');
+                    }, 3000);
+                }
+                
+                if (saveCsvBtn) {
+                    saveCsvBtn.addEventListener('click', function() {
+                        try {
+                            var questionCount = document.getElementById('question-count-<<video_id>>').value;
+                            var taskValue = document.getElementById('task-select-<<video_id>>').value || 'KIS';
+                            
+                            // Validate question count
+                            if (!questionCount || questionCount.trim() === '' || parseInt(questionCount) <= 0) {
+                                showSaveNotification('Vui lòng nhập số câu hỏi trước khi lưu CSV', true);
+                                return;
+                            }
+                            
+                            // Check if there's data to save
+                            if (!previewData_<<vid_us>> || previewData_<<vid_us>>.length === 0) {
+                                showSaveNotification('Không có dữ liệu để lưu. Vui lòng thêm dữ liệu trước.', true);
+                                return;
+                            }
+                            
+                            // Format task name to lowercase
+                            var taskLower = taskValue.toLowerCase();
+                            var filename = 'query-' + questionCount + '-' + taskLower + '.csv';
+                            
+                            // Create CSV content
+                            var csvContent = '';
+                            for (var i = 0; i < previewData_<<vid_us>>.length; i++) {
+                                csvContent += previewData_<<vid_us>>[i] + '\\n';
+                            }
+                            
+                            // Validate CSV content
+                            if (!csvContent || csvContent.trim() === '') {
+                                showSaveNotification('Dữ liệu CSV trống. Vui lòng kiểm tra lại.', true);
+                                return;
+                            }
+                            
+                            // Check if file would be empty (only whitespace/newlines)
+                            var cleanContent = csvContent.replace(/\\n/g, '').replace(/\\r/g, '').trim();
+                            if (cleanContent === '') {
+                                showSaveNotification('File sẽ rỗng. Vui lòng thêm dữ liệu trước khi lưu.', true);
+                                return;
+                            }
+                            
+                            // Create and download file
+                            var blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                            var url = window.URL.createObjectURL(blob);
+                            var a = document.createElement('a');
+                            a.href = url;
+                            a.download = filename;
+                            a.style.display = 'none';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            window.URL.revokeObjectURL(url);
+                            
+                            showSaveNotification('Đã lưu file ' + filename + ' thành công! (' + previewData_<<vid_us>>.length + ' dòng)');
+                            
+                        } catch (error) {
+                            console.error('Error saving CSV:', error);
+                            showSaveNotification('Lỗi khi lưu file: ' + error.message, true);
+                        }
+                    });
+                }
+
+                // Frame slider
+                window._seeking_<<vid_us>>=false;
+                var frameSlider=document.getElementById('seek-frame-<<video_id>>');
+                var frameLeft=document.getElementById('frame-left-<<video_id>>');
+                if (frameSlider){
+                    frameSlider.addEventListener('input',function(){ window._seeking_<<vid_us>>=True; var f=parseInt(frameSlider.value,10)||0; if (frameLeft) frameLeft.innerHTML='<strong>'+f+' F</strong>'; });
+                    frameSlider.addEventListener('change',function(){ var f=parseInt(frameSlider.value,10)||0; var t=f/fps; try{ player_<<vid_us>>.seekTo(t,true);}catch(_){}
+                        window._seeking_<<vid_us>>=false; });
+                    frameSlider.addEventListener('mousedown',function(){ window._seeking_<<vid_us>>=true; });
+                    frameSlider.addEventListener('mouseup',function(){ window._seeking_<<vid_us>>=false; });
+                }
+
+                // Dual-range init (giữ như cũ, rút gọn kiểm tra)
+                try{
+                    var maxBound=Math.max(1, Math.floor(startTime*fps)+1);
+                    var rangeMin=document.getElementById('rs-range-min-<<video_id>>');
+                    var rangeMax=document.getElementById('rs-range-max-<<video_id>>');
+                    var inputMin=document.getElementById('rs-input-min-<<video_id>>');
+                    var inputMax=document.getElementById('rs-input-max-<<video_id>>');
+                    var progress=document.getElementById('rs-progress-<<video_id>>');
+                    var totalEl=document.getElementById('rs-total-<<video_id>>');
+                    function clamp(v,lo,hi){v=parseInt(v||0); if(isNaN(v)) v=0; return Math.min(hi, Math.max(lo,v));}
+                    function upd(){
+                        var mn=parseInt(rangeMin&&rangeMin.value||0), mx=parseInt(rangeMax&&rangeMax.value||0);
+                        var maxV=parseInt((rangeMax&&rangeMax.max)||maxBound)||maxBound;
+                        if (progress){ progress.style.left=(mn/maxV*100)+'%'; progress.style.right=(100-(mx/maxV*100))+'%'; }
+                        if (totalEl){ totalEl.textContent=Math.max(0, mx-mn); }
+                    }
+                    
+                    // Current button event listeners
+                    var minCurrentBtn=document.getElementById('rs-min-current-<<video_id>>');
+                    var maxCurrentBtn=document.getElementById('rs-max-current-<<video_id>>');
+                    if (minCurrentBtn&&inputMin&&rangeMin){ minCurrentBtn.addEventListener('click',function(){ var currentFrame=Math.round(player_<<vid_us>>.getCurrentTime()*fps); inputMin.value=currentFrame; rangeMin.value=currentFrame; if(rangeMax&&parseInt(rangeMax.value)<currentFrame){ rangeMax.value=currentFrame; if(inputMax) inputMax.value=currentFrame; } upd(); }); }
+                    if (maxCurrentBtn&&inputMax&&rangeMax){ maxCurrentBtn.addEventListener('click',function(){ var currentFrame=Math.round(player_<<vid_us>>.getCurrentTime()*fps); inputMax.value=currentFrame; rangeMax.value=currentFrame; if(rangeMin&&parseInt(rangeMin.value)>currentFrame){ rangeMin.value=currentFrame; if(inputMin) inputMin.value=currentFrame; } upd(); }); }
+                    if (inputMin&&rangeMin){ inputMin.addEventListener('input',function(e){ var v=clamp(e.target.value, parseInt(rangeMin.min||0), parseInt(rangeMin.max||maxBound)); rangeMin.value=v; if(rangeMax&&parseInt(rangeMax.value)<v) rangeMax.value=v; upd(); }); }
+                    if (inputMax&&rangeMax){ inputMax.addEventListener('input',function(e){ var v=clamp(e.target.value, parseInt(rangeMax.min||0), parseInt(rangeMax.max||maxBound)); rangeMax.value=v; if(rangeMin&&parseInt(rangeMin.value)>v) rangeMin.value=v; upd(); }); }
+                    var stepSizeInput=document.getElementById('rs-step-size-<<video_id>>');
+                    var maxUpBtn=document.getElementById('rs-max-up-<<video_id>>');
+                    var maxDownBtn=document.getElementById('rs-max-down-<<video_id>>');
+                    if (maxUpBtn&&inputMax&&rangeMax){ maxUpBtn.addEventListener('click',function(){ var s=parseInt(stepSizeInput&&stepSizeInput.value||5); var cv=parseInt(inputMax.value||0); var nv=Math.min(parseInt(rangeMax.max||maxBound), cv+s); inputMax.value=nv; rangeMax.value=nv; upd(); }); }
+                    if (maxDownBtn&&inputMax&&rangeMax){ maxDownBtn.addEventListener('click',function(){ var s=parseInt(stepSizeInput&&stepSizeInput.value||5); var cv=parseInt(inputMax.value||0); var nv=Math.max(parseInt(rangeMax.min||0), cv-s); inputMax.value=nv; rangeMax.value=nv; if(rangeMin&&parseInt(rangeMin.value)>nv){ rangeMin.value=nv; if(inputMin) inputMin.value=nv; } upd(); }); }
+                    if (rangeMin){ rangeMin.addEventListener('input',function(e){ var v=clamp(e.target.value, parseInt(rangeMin.min||0), parseInt(rangeMin.max||maxBound)); if(rangeMax&&parseInt(rangeMax.value)<v) v=parseInt(rangeMax.value); rangeMin.value=v; if(inputMin) inputMin.value=v; upd(); }); }
+                    if (rangeMax){ rangeMax.addEventListener('input',function(e){ var v=clamp(e.target.value, parseInt(rangeMax.min||0), parseInt(rangeMax.max||maxBound)); if(rangeMin&&parseInt(rangeMin.value)>v) v=parseInt(rangeMin.value); rangeMax.value=v; if(inputMax) inputMax.value=v; upd(); }); }
+                    if (rangeMin&&rangeMax&&inputMin&&inputMax){ var initF=Math.floor(startTime*fps); rangeMin.value=initF; rangeMax.value=initF; inputMin.value=initF; inputMax.value=initF+1; upd(); }
+                }catch(_){}
+            });
+
+            function onYouTubeIframeAPIReady(){
+                player_<<vid_us>>=new YT.Player('ytplayer-<<video_id>>',{events:{'onReady':onPlayerReady_<<vid_us>>, 'onStateChange':onPlayerStateChange_<<vid_us>>}});
+            }
+            function onPlayerReady_<<vid_us>>(){
+                document.getElementById('status-<<video_id>>').textContent='Player Ready';
+                try{ if(player_<<vid_us>>&&typeof player_<<vid_us>>.seekTo==='function'){ player_<<vid_us>>.seekTo(startTime,true); } }catch(_){}
+                try{
+                    var dur = player_<<vid_us>>.getDuration ? player_<<vid_us>>.getDuration() : null;
+                    var frameSlider=document.getElementById('seek-frame-<<video_id>>'); var frameRight=document.getElementById('frame-right-<<video_id>>');
+                    if(frameSlider && dur && isFinite(dur) && dur>0){
+                        var maxF=Math.floor(dur*fps); frameSlider.max=maxF;
+                        var rsRangeMin=document.getElementById('rs-range-min-<<video_id>>'); var rsRangeMax=document.getElementById('rs-range-max-<<video_id>>'); var rsProgress=document.getElementById('rs-progress-<<video_id>>');
+                        if (rsRangeMin&&rsRangeMax){ rsRangeMin.max=maxF; rsRangeMax.max=maxF; var mn=parseInt(rsRangeMin.value||0), mx=parseInt(rsRangeMax.value||0), maxV=maxF; if (rsProgress){ rsProgress.style.left=(mn/maxV*100)+'%'; rsProgress.style.right=(100-(mx/maxV*100))+'%'; } var totalEl=document.getElementById('rs-total-<<video_id>>'); if (totalEl) totalEl.textContent=Math.max(0,mx-mn); }
+                        if (frameRight) frameRight.innerHTML='<strong>'+maxF+' F</strong>';
+                    }
+                }catch(_){}
+                if (timeUpdateInterval_<<vid_us>>) clearInterval(timeUpdateInterval_<<vid_us>>);
+                timeUpdateInterval_<<vid_us>>=setInterval(function(){ updateTimeAndFrame_<<vid_us>>(); },200);
+            }
+            function onPlayerStateChange_<<vid_us>>(ev){
+                var stateNames={0:'Ended',1:'Playing',2:'Paused',3:'Buffering',5:'Cued'};
+                document.getElementById('player-state-<<video_id>>').textContent = stateNames[ev.data] || 'Unknown';
+                updateTimeAndFrame_<<vid_us>>();
+            }
         </script>
     </body>
     </html>
     """
+    html_content = (html_template
+        .replace("<<video_id>>", video_id)
+        .replace("<<vid_us>>", vid_us)
+        .replace("<<video_name>>", video_name)
+        .replace("<<start_time>>", f"{start_time:.1f}")
+        .replace("<<fps>>", f"{fps}")
+        .replace("<<start_frame>>", f"{start_frame}")
+        .replace("<<start_frame_plus_1>>", f"{start_frame + 1}")
+        .replace("<<seek_max_init>>", f"{seek_max_init}")
+    )
     return html_content
+
+
 
 def fallback_translate_and_create_aspects(query_vi: str) -> Tuple[List[Dict], Dict]:
     """Fallback: translate query to English and create aspects from each line"""
@@ -1530,7 +2190,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
         "Gemini API Key:",
         value=GOOGLE_API_KEY,
         type="password",
-        help="Enter your Google Gemini API key. You can get one from https://makersuite.google.com/app/apikey"
+        help="Enter your Google Gemini API key. You can get one from https://aistudio.google.com"
     )
 
     # Update the global API key if changed
@@ -1548,7 +2208,7 @@ with st.expander("🔑 Gemini API Configuration", expanded=False):
                 "Gemini Model:",
                 ["gemini-2.5-flash", "gemini-2.5-pro"],
                 index=0,
-                help="gemini-2.5-pro: High quality, gemini-2.5-flash: Fast speed"
+                help="gemini-2.5-pro: High quality, gemini-2.5-flash: Fast speed but sometime get bad result"
             )
 
         st.markdown("**Generation Parameters:**")
@@ -1949,7 +2609,7 @@ elif gemini_available:
                     try:
                         enhanced_data = extract_aspects_and_seeds_with_gemini(
                             query_vi, gemini_temperature, gemini_top_p,
-                            gemini_model if 'gemini_model' in locals() else "gemini-2.5-pro",
+                            gemini_model if 'gemini_model' in locals() else "gemini-2.5-flash",
                             max_aspects_input.strip() if max_aspects_input.strip() else "N"
                         )
                         st.session_state.enhanced_data = enhanced_data
@@ -2077,11 +2737,6 @@ if run:
                         url = get_watch_url(vid)
                         if url:
                             with st.popover("🎥 Watch Video", use_container_width=True):
-                                st.markdown(f"**Video:** {vid}")
-                                st.markdown(f"**Timestamp:** {sec_to_mmss(timestamp)}")
-                                st.markdown(f"**Keyframe:** {actual_frame}")
-                                st.markdown(f"**BM25 Score:** {score:.3f}")
-
                                 # Display highlighted full text in video player
                                 highlighted_text = result.get("highlighted_full_text", snippet)
                                 st.markdown(f"""
@@ -2096,7 +2751,7 @@ if run:
                                 # Use the original timestamp from BM25 results
                                 start_sec = int(max(0, timestamp))
 
-                                components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps), height=700)
+                                components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
                         else:
                             st.markdown("No video URL available")
 
@@ -2126,7 +2781,7 @@ if run:
         (spec, buf) = run_with_logs(
             extract_aspects_and_seeds_with_gemini,
             query_vi, gemini_temperature, gemini_top_p,
-            gemini_model if 'gemini_model' in locals() else "gemini-2.5-pro",
+            gemini_model if 'gemini_model' in locals() else "gemini-2.5-flash",
             max_aspects_input.strip() if max_aspects_input.strip() else "N"
         )
         if spec is None:
@@ -2342,10 +2997,6 @@ if run:
                     if url:
                         # Watch Video button with popover
                         with st.popover("🎥 Watch Video", use_container_width=True):
-                            st.markdown(f"**Video:** {vid}")
-                            st.markdown(f"**Time Window:** {t0s} → {t1s}")
-                            st.markdown(f"**Total Score:** {r['total']:.3f}")
-                            
                             # Use the actual video ID from dataset (not from YouTube URL)
                             start_sec = int(max(0, win['t0']))
                             actual_video_id = vid  # Use the dataset video ID (e.g., K16_V013)
@@ -2355,7 +3006,7 @@ if run:
                             actual_fps = get_fps_from_csv(actual_video_id)
                             
                             # Use the working YouTube API with FPS-based frame calculation
-                            components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps), height=700)
+                            components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
                     else:
                         st.markdown("No video URL available")
                     st.divider()
@@ -2438,10 +3089,6 @@ if run:
                     if url:
                         # Watch Video button with popover
                         with st.popover("🎥 Watch Video", use_container_width=True):
-                            st.markdown(f"**Video:** {vid}")
-                            st.markdown(f"**Time Window:** {t0s} → {t1s}")
-                            st.markdown(f"**Total Score:** {r['total']:.3f}")
-                            
                             # Use the actual video ID from dataset (not from YouTube URL)
                             start_sec = int(max(0, win['t0']))
                             actual_video_id = vid  # Use the dataset video ID (e.g., K16_V013)
@@ -2451,8 +3098,7 @@ if run:
                             actual_fps = get_fps_from_csv(actual_video_id)
                             
                             # Use the working YouTube API with FPS-based frame calculation
-                            components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps), height=700)
+                            components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
                     else:
                         st.markdown("No video URL available")
                     st.divider()
-
