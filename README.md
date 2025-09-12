@@ -133,6 +133,8 @@ Open the printed local URL in your browser.
 
 ## 🖥️ UI overview
 
+### 🔍 Search Interface
+
 - **Search Filters**  
   - Dataset: `Both / Batch 1 / Batch 2`  
   - Exclude Series: `L01,L02,K01,...`  
@@ -157,6 +159,32 @@ Open the printed local URL in your browser.
 - **Query box**
   - Natural language (VI/EN) for CLIP modes
   - BM25 mode accepts FTS5 queries (see syntax popover in the app)
+
+### 🎯 Video Annotation Interface
+
+- **Task Configuration**
+  - Question Count: Number of questions for annotation
+  - Task Type: KIS, QA, or TRAKE selection
+  - Answer Input: For QA tasks (when applicable)
+
+- **Video Player Controls**
+  - Frame Slider: Navigate through video frames
+  - Range Slider: Select frame ranges with dual thumbs
+  - Go to Frame: Jump to specific frame numbers
+  - Current Buttons: Set range to current frame
+  - Step Controls: Increment/decrement values
+
+- **Data Collection**
+  - Add Button: Collect single frame
+  - Add Batch Button: Collect frame range
+  - Scene Management: For TRAKE tasks (dynamic scene inputs)
+  - Auto-advance: Move to next scene automatically
+
+- **Data Management**
+  - Preview Result: Live preview of collected data
+  - Delete Range: Remove entries by row numbers
+  - Save CSV: Export annotations with proper formatting
+  - Notifications: Success/error feedback system
 
 ---
 
@@ -221,6 +249,65 @@ If a JSON exists at `media-info/{video_id}.json` with `{ "watch_url": "..." }`, 
 - Seeks to the matched second.
 - Displays **current time** and computed **frame** via `FPS` read from `map-keyframes/{video_id}.csv`.
 - Allows seeking by **frame number**.
+
+---
+
+## 🎯 Video Annotation Features
+
+The app now includes comprehensive video annotation capabilities for data collection and labeling tasks:
+
+### 📝 Task Types
+
+- **KIS (Keyframe Identification System)**: Collect single frame annotations
+- **QA (Question Answering)**: Collect frame annotations with answer text
+- **TRAKE (Tracking)**: Collect multi-scene frame combinations
+
+### 🎮 Interactive Video Player
+
+- **Dual-thumb Range Slider**: Select frame ranges with visual feedback
+- **Frame Slider**: Navigate through video frames
+- **Go to Frame**: Jump to specific frame numbers
+- **Time Display**: Shows current time in `mm:ss:ff` format
+- **Auto-start**: Video starts at specified timestamp
+
+### 📊 Data Collection Interface
+
+- **Question Count Input**: Specify number of questions for annotation
+- **Task Selection**: Choose between KIS, QA, or TRAKE tasks
+- **Answer Input**: For QA tasks, enter answer text
+- **Scene Management**: For TRAKE tasks, manage multiple scenes with dynamic inputs
+
+### 🎨 Advanced UI Features
+
+- **Scene Buttons**: Visual scene selection with color-coded states (red=empty, green=filled)
+- **Auto-advance**: Automatically move to next scene after adding data
+- **Current Buttons**: Set range boundaries to current frame
+- **Step Controls**: Increment/decrement range values
+- **Real-time Validation**: Input validation with error notifications
+
+### 💾 Data Management
+
+- **Preview Result**: Live preview of collected data (limit: 100 entries)
+- **Delete Range**: Remove entries by specifying row ranges
+- **CSV Export**: Save annotations with format `query-<số_câu>-<task>.csv`
+- **Error Handling**: Comprehensive validation and error notifications
+- **Success Feedback**: Confirmation messages for all operations
+
+### 🔧 Technical Features
+
+- **Format Spacing**: Proper CSV formatting with spaces after commas
+- **Task Validation**: Ensures question count and task selection before saving
+- **File Validation**: Prevents saving empty or invalid files
+- **Notification System**: Fade-in/fade-out notifications for user feedback
+- **Responsive Layout**: Optimized for different screen sizes
+
+### 📋 Usage Workflow
+
+1. **Setup**: Enter question count and select task type
+2. **Navigate**: Use sliders and controls to find desired frames
+3. **Collect**: Add single frames or ranges using Add/Add Batch buttons
+4. **Manage**: Review, edit, or delete collected data in Preview Result
+5. **Export**: Save final annotations as CSV file
 
 ---
 
