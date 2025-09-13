@@ -1293,15 +1293,19 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                                 <input type="range" class="range-min" id="rs-range-min-<<video_id>>" min="0" max="<<seek_max_init>>" value="<<start_frame>>" step="1">
                                 <input type="range" class="range-max" id="rs-range-max-<<video_id>>" min="0" max="<<seek_max_init>>" value="<<start_frame>>" step="1">
                             </div>
-                            <div class="rs-total"><strong id="rs-total-<<video_id>>">0</strong></div>
-                            
                             <!-- Add Batch button for KIS/QA tasks -->
                             <div id="add-batch-wrap-<<video_id>>" style="display:none; margin-top:10px; text-align:center;">
+                                <div id="frames-total-display-<<video_id>>" style="margin-bottom:8px; font-size:12px; color:#ccc;">
+                                    <strong>Frames total: <span id="frames-total-count-<<video_id>>">0</span></strong>
+                                </div>
                                 <button id="add-batch-<<video_id>>" class="add-btn">Add Batch</button>
                     </div>
                             
                             <!-- TRAKE Add Batch button -->
                             <div id="trake-add-batch-wrap-<<video_id>>" style="display:none; margin-top:10px; text-align:center;">
+                                <div id="trake-frames-total-display-<<video_id>>" style="margin-bottom:8px; font-size:12px; color:#ccc;">
+                                    <strong>Frames total: <span id="trake-frames-total-count-<<video_id>>">0</span></strong>
+                                </div>
                                 <button id="trake-add-batch-<<video_id>>" class="add-btn">Add Batch</button>
                             </div>
                         </div>
@@ -1562,17 +1566,21 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                 var scenesWrap=document.getElementById('trake-scenes-wrap-<<video_id>>');
                 var addSingleWrap=document.getElementById('add-single-wrap-<<video_id>>');
                 var addBatchWrap=document.getElementById('add-batch-wrap-<<video_id>>');
+                var framesTotalDisplay=document.getElementById('frames-total-display-<<video_id>>');
+                var framesTotalCount=document.getElementById('frames-total-count-<<video_id>>');
                 var trakeAddSingleWrap=document.getElementById('trake-add-single-wrap-<<video_id>>');
                 var trakeAddBatchWrap=document.getElementById('trake-add-batch-wrap-<<video_id>>');
+                var trakeFramesTotalDisplay=document.getElementById('trake-frames-total-display-<<video_id>>');
+                var trakeFramesTotalCount=document.getElementById('trake-frames-total-count-<<video_id>>');
                 var trakeSceneNumberWrap=document.getElementById('trake-scene-number-wrap-<<video_id>>');
                 var trakeSceneButtons=document.getElementById('trake-scene-buttons-<<video_id>>');
                 var trakeSceneInputs=document.getElementById('trake-scene-inputs-<<video_id>>');
                 var trakeConfirmBtn=document.getElementById('trake-confirm-<<video_id>>');
-                  var trakeScenesInput=document.getElementById('trake-scenes-<<video_id>>');
-                  var trakeSuccessNotification=document.getElementById('trake-success-notification-<<video_id>>');
-                  var trakeTotalDisplay=document.getElementById('trake-total-display-<<video_id>>');
-                  var trakeTotalCount=document.getElementById('trake-total-count-<<video_id>>');
-                  var selectedSceneNum = 1; // Track currently selected scene
+                var trakeScenesInput=document.getElementById('trake-scenes-<<video_id>>');
+                var trakeSuccessNotification=document.getElementById('trake-success-notification-<<video_id>>');
+                var trakeTotalDisplay=document.getElementById('trake-total-display-<<video_id>>');
+                var trakeTotalCount=document.getElementById('trake-total-count-<<video_id>>');
+                var selectedSceneNum = 1; // Track currently selected scene
                 
                 function updateTaskConditional(){
                     if (qaWrap)    qaWrap.style.display     = (taskSel && taskSel.value==='QA')   ? 'flex' : 'none';
@@ -1581,8 +1589,10 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                     var showTrakeButtons = (taskSel && taskSel.value==='TRAKE');
                     if (addSingleWrap) addSingleWrap.style.display = showAddButtons ? 'block' : 'none';
                     if (addBatchWrap) addBatchWrap.style.display = showAddButtons ? 'block' : 'none';
+                    if (framesTotalDisplay) framesTotalDisplay.style.display = showAddButtons ? 'block' : 'none';
                     if (trakeAddSingleWrap) trakeAddSingleWrap.style.display = showTrakeButtons ? 'block' : 'none';
                       if (trakeAddBatchWrap) trakeAddBatchWrap.style.display = showTrakeButtons ? 'block' : 'none';
+                      if (trakeFramesTotalDisplay) trakeFramesTotalDisplay.style.display = showTrakeButtons ? 'block' : 'none';
                       if (trakeSceneNumberWrap) trakeSceneNumberWrap.style.display = showTrakeButtons ? 'block' : 'none';
                       if (trakeTotalDisplay) trakeTotalDisplay.style.display = showTrakeButtons ? 'block' : 'none';
                       // Go to Frame is always visible for all tasks
@@ -1846,6 +1856,19 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                         trakeTotalCount.textContent = total.toLocaleString();
                     } else {
                         trakeTotalCount.textContent = '0';
+                    }
+                }
+                
+                function updateFramesTotal() {
+                    var minFrame = parseInt(document.getElementById('rs-input-min-<<video_id>>').value) || 0;
+                    var maxFrame = parseInt(document.getElementById('rs-input-max-<<video_id>>').value) || 0;
+                    var totalFrames = Math.max(0, maxFrame - minFrame + 1);
+                    
+                    if (framesTotalCount) {
+                        framesTotalCount.textContent = totalFrames;
+                    }
+                    if (trakeFramesTotalCount) {
+                        trakeFramesTotalCount.textContent = totalFrames;
                     }
                 }
                 
@@ -2143,30 +2166,28 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                     var inputMin=document.getElementById('rs-input-min-<<video_id>>');
                     var inputMax=document.getElementById('rs-input-max-<<video_id>>');
                     var progress=document.getElementById('rs-progress-<<video_id>>');
-                    var totalEl=document.getElementById('rs-total-<<video_id>>');
                     function clamp(v,lo,hi){v=parseInt(v||0); if(isNaN(v)) v=0; return Math.min(hi, Math.max(lo,v));}
                     function upd(){
                         var mn=parseInt(rangeMin&&rangeMin.value||0), mx=parseInt(rangeMax&&rangeMax.value||0);
                         var maxV=parseInt((rangeMax&&rangeMax.max)||maxBound)||maxBound;
                         if (progress){ progress.style.left=(mn/maxV*100)+'%'; progress.style.right=(100-(mx/maxV*100))+'%'; }
-                        if (totalEl){ totalEl.textContent=Math.max(0, mx-mn); }
                     }
                     
                     // Current button event listeners
                     var minCurrentBtn=document.getElementById('rs-min-current-<<video_id>>');
                     var maxCurrentBtn=document.getElementById('rs-max-current-<<video_id>>');
-                    if (minCurrentBtn&&inputMin&&rangeMin){ minCurrentBtn.addEventListener('click',function(){ var currentFrame=Math.round(player_<<vid_us>>.getCurrentTime()*fps); inputMin.value=currentFrame; rangeMin.value=currentFrame; if(rangeMax&&parseInt(rangeMax.value)<currentFrame){ rangeMax.value=currentFrame; if(inputMax) inputMax.value=currentFrame; } upd(); }); }
-                    if (maxCurrentBtn&&inputMax&&rangeMax){ maxCurrentBtn.addEventListener('click',function(){ var currentFrame=Math.round(player_<<vid_us>>.getCurrentTime()*fps); inputMax.value=currentFrame; rangeMax.value=currentFrame; if(rangeMin&&parseInt(rangeMin.value)>currentFrame){ rangeMin.value=currentFrame; if(inputMin) inputMin.value=currentFrame; } upd(); }); }
-                     if (inputMin&&rangeMin){ inputMin.addEventListener('keydown',function(e){ if(e.key==='Enter'){ var v=clamp(e.target.value, parseInt(rangeMin.min||0), parseInt(rangeMin.max||maxBound)); rangeMin.value=v; if(rangeMax&&parseInt(rangeMax.value)<v) rangeMax.value=v; upd(); } }); }
-                     if (inputMax&&rangeMax){ inputMax.addEventListener('keydown',function(e){ if(e.key==='Enter'){ var v=clamp(e.target.value, parseInt(rangeMax.min||0), parseInt(rangeMax.max||maxBound)); rangeMax.value=v; if(rangeMin&&parseInt(rangeMin.value)>v) rangeMin.value=v; upd(); } }); }
+                    if (minCurrentBtn&&inputMin&&rangeMin){ minCurrentBtn.addEventListener('click',function(){ var currentFrame=Math.round(player_<<vid_us>>.getCurrentTime()*fps); inputMin.value=currentFrame; rangeMin.value=currentFrame; if(rangeMax&&parseInt(rangeMax.value)<currentFrame){ rangeMax.value=currentFrame; if(inputMax) inputMax.value=currentFrame; } upd(); updateFramesTotal(); }); }
+                    if (maxCurrentBtn&&inputMax&&rangeMax){ maxCurrentBtn.addEventListener('click',function(){ var currentFrame=Math.round(player_<<vid_us>>.getCurrentTime()*fps); inputMax.value=currentFrame; rangeMax.value=currentFrame; if(rangeMin&&parseInt(rangeMin.value)>currentFrame){ rangeMin.value=currentFrame; if(inputMin) inputMin.value=currentFrame; } upd(); updateFramesTotal(); }); }
+                     if (inputMin&&rangeMin){ inputMin.addEventListener('keydown',function(e){ if(e.key==='Enter'){ var v=clamp(e.target.value, parseInt(rangeMin.min||0), parseInt(rangeMin.max||maxBound)); rangeMin.value=v; if(rangeMax&&parseInt(rangeMax.value)<v) rangeMax.value=v; upd(); updateFramesTotal(); } }); }
+                     if (inputMax&&rangeMax){ inputMax.addEventListener('keydown',function(e){ if(e.key==='Enter'){ var v=clamp(e.target.value, parseInt(rangeMax.min||0), parseInt(rangeMax.max||maxBound)); rangeMax.value=v; if(rangeMin&&parseInt(rangeMin.value)>v) rangeMin.value=v; upd(); updateFramesTotal(); } }); }
                     var stepSizeInput=document.getElementById('rs-step-size-<<video_id>>');
                     var maxUpBtn=document.getElementById('rs-max-up-<<video_id>>');
                     var maxDownBtn=document.getElementById('rs-max-down-<<video_id>>');
-                    if (maxUpBtn&&inputMax&&rangeMax){ maxUpBtn.addEventListener('click',function(){ var s=parseInt(stepSizeInput&&stepSizeInput.value||5); var cv=parseInt(inputMax.value||0); var nv=Math.min(parseInt(rangeMax.max||maxBound), cv+s); inputMax.value=nv; rangeMax.value=nv; upd(); }); }
-                    if (maxDownBtn&&inputMax&&rangeMax){ maxDownBtn.addEventListener('click',function(){ var s=parseInt(stepSizeInput&&stepSizeInput.value||5); var cv=parseInt(inputMax.value||0); var nv=Math.max(parseInt(rangeMax.min||0), cv-s); inputMax.value=nv; rangeMax.value=nv; if(rangeMin&&parseInt(rangeMin.value)>nv){ rangeMin.value=nv; if(inputMin) inputMin.value=nv; } upd(); }); }
-                    if (rangeMin){ rangeMin.addEventListener('input',function(e){ var v=clamp(e.target.value, parseInt(rangeMin.min||0), parseInt(rangeMin.max||maxBound)); if(rangeMax&&parseInt(rangeMax.value)<v) v=parseInt(rangeMax.value); rangeMin.value=v; if(inputMin) inputMin.value=v; upd(); }); }
-                    if (rangeMax){ rangeMax.addEventListener('input',function(e){ var v=clamp(e.target.value, parseInt(rangeMax.min||0), parseInt(rangeMax.max||maxBound)); if(rangeMin&&parseInt(rangeMin.value)>v) v=parseInt(rangeMin.value); rangeMax.value=v; if(inputMax) inputMax.value=v; upd(); }); }
-                    if (rangeMin&&rangeMax&&inputMin&&inputMax){ var initF=Math.floor(startTime*fps); rangeMin.value=initF; rangeMax.value=initF; inputMin.value=initF; inputMax.value=initF+1; upd(); }
+                    if (maxUpBtn&&inputMax&&rangeMax){ maxUpBtn.addEventListener('click',function(){ var s=parseInt(stepSizeInput&&stepSizeInput.value||5); var cv=parseInt(inputMax.value||0); var nv=Math.min(parseInt(rangeMax.max||maxBound), cv+s); inputMax.value=nv; rangeMax.value=nv; upd(); updateFramesTotal(); }); }
+                    if (maxDownBtn&&inputMax&&rangeMax){ maxDownBtn.addEventListener('click',function(){ var s=parseInt(stepSizeInput&&stepSizeInput.value||5); var cv=parseInt(inputMax.value||0); var nv=Math.max(parseInt(rangeMax.min||0), cv-s); inputMax.value=nv; rangeMax.value=nv; if(rangeMin&&parseInt(rangeMin.value)>nv){ rangeMin.value=nv; if(inputMin) inputMin.value=nv; } upd(); updateFramesTotal(); }); }
+                    if (rangeMin){ rangeMin.addEventListener('input',function(e){ var v=clamp(e.target.value, parseInt(rangeMin.min||0), parseInt(rangeMin.max||maxBound)); if(rangeMax&&parseInt(rangeMax.value)<v) v=parseInt(rangeMax.value); rangeMin.value=v; if(inputMin) inputMin.value=v; upd(); updateFramesTotal(); }); }
+                    if (rangeMax){ rangeMax.addEventListener('input',function(e){ var v=clamp(e.target.value, parseInt(rangeMax.min||0), parseInt(rangeMax.max||maxBound)); if(rangeMin&&parseInt(rangeMin.value)>v) v=parseInt(rangeMin.value); rangeMax.value=v; if(inputMax) inputMax.value=v; upd(); updateFramesTotal(); }); }
+                    if (rangeMin&&rangeMax&&inputMin&&inputMax){ var initF=Math.floor(startTime*fps); rangeMin.value=initF; rangeMax.value=initF; inputMin.value=initF; inputMax.value=initF+1; upd(); updateFramesTotal(); }
                 }catch(_){}
             });
 
@@ -2182,7 +2203,7 @@ def create_youtube_player_html(video_id: str, start_time: float, fps: float = 25
                     if(frameSlider && dur && isFinite(dur) && dur>0){
                         var maxF=Math.floor(dur*fps); frameSlider.max=maxF;
                         var rsRangeMin=document.getElementById('rs-range-min-<<video_id>>'); var rsRangeMax=document.getElementById('rs-range-max-<<video_id>>'); var rsProgress=document.getElementById('rs-progress-<<video_id>>');
-                        if (rsRangeMin&&rsRangeMax){ rsRangeMin.max=maxF; rsRangeMax.max=maxF; var mn=parseInt(rsRangeMin.value||0), mx=parseInt(rsRangeMax.value||0), maxV=maxF; if (rsProgress){ rsProgress.style.left=(mn/maxV*100)+'%'; rsProgress.style.right=(100-(mx/maxV*100))+'%'; } var totalEl=document.getElementById('rs-total-<<video_id>>'); if (totalEl) totalEl.textContent=Math.max(0,mx-mn); }
+                        if (rsRangeMin&&rsRangeMax){ rsRangeMin.max=maxF; rsRangeMax.max=maxF; var mn=parseInt(rsRangeMin.value||0), mx=parseInt(rsRangeMax.value||0), maxV=maxF; if (rsProgress){ rsProgress.style.left=(mn/maxV*100)+'%'; rsProgress.style.right=(100-(mx/maxV*100))+'%'; } }
                         if (frameRight) frameRight.innerHTML='<strong>'+maxF+' F</strong>';
                     }
                 }catch(_){}
