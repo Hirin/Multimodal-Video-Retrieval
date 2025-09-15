@@ -2,5 +2,4 @@
 __pycache__
 .env
 kaggle.json
-downloads/
-test.py
+*.mp4
