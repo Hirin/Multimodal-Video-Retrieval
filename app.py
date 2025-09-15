@@ -2320,6 +2320,23 @@ def get_watch_url(video_id: str) -> Optional[str]:
             continue
     return None
 
+def get_video_info(video_id: str) -> Optional[dict]:
+    """Get video information from media-info JSON files"""
+    media_info_dirs = [
+        f"{DATA_ROOT}b1/media-info/",
+        f"{DATA_ROOT}b2/media-info/",
+    ]
+    candidates = [Path(media_dir) / f"{video_id}.json" for media_dir in media_info_dirs]
+
+    for p in candidates:
+        try:
+            if p.exists():
+                data = json.loads(Path(p).read_text(encoding='utf-8'))
+                return data
+        except Exception:
+            continue
+    return None
+
 # =============================== STREAMLIT UI ============================================
 st.set_page_config(page_title="HCMC AI 2025 – CLIP + BM25 Search", layout="wide")
 
@@ -2608,6 +2625,7 @@ with col_mode:
             "CLIP Multi-aspects Search",
             "CLIP Multi-aspects Search + Rerank",
             "BM25 Keyword Search",
+            "Search by Video ID",
         ],
         index=0,
     )
@@ -2615,6 +2633,7 @@ with col_mode:
 # Derive mode flags from selection
 rerank_enabled = (search_mode == "CLIP Multi-aspects Search + Rerank")
 bm25_enabled = (search_mode == "BM25 Keyword Search")
+video_id_enabled = (search_mode == "Search by Video ID")
 
 # Reset run/caches when switching modes to prevent unintended auto-runs
 if 'last_mode' not in st.session_state:
@@ -2693,6 +2712,18 @@ if bm25_enabled:
             """)
 
 
+# Video ID input when enabled
+if video_id_enabled:
+    st.markdown("**Video ID Search:**")
+    video_id_input = st.text_input(
+        "Enter Video ID:",
+        placeholder="e.g., K01_V001, L02_V005",
+        help="Enter the video ID to search for (e.g., K01_V001, L02_V005)",
+        key="video_id_input"
+    )
+else:
+    video_id_input = ""
+
 # Dynamic placeholder based on search mode
 if bm25_enabled:
     placeholder_text = """Ví dụ BM25 queries:
@@ -2704,7 +2735,11 @@ Nhấn nút "📚 BM25 Query Syntax" để xem chi tiết syntax."""
 else:
     placeholder_text = "Nhập miêu tả truy vấn tiếng Việt / English ..."
 
-query_vi = st.text_area("Enter Query:", height=150, placeholder=placeholder_text)
+# Only show query input if not in video ID mode
+if not video_id_enabled:
+    query_vi = st.text_area("Enter Query:", height=150, placeholder=placeholder_text)
+else:
+    query_vi = ""  # Set empty query for video ID mode
 
 # Button styling for full width
 st.markdown(
@@ -2801,6 +2836,15 @@ if bm25_enabled:
         else:
             run = True; st.session_state['run_flag'] = True
             st.info("🔍 **BM25 Keyword Search** - Searching directly by keywords")
+elif video_id_enabled:
+    # Video ID mode - always show Search Video directly (no enhancement needed)
+    run_button = st.button("🔍 Search Video", use_container_width=True, type="primary")
+    if run_button:
+        if not video_id_input.strip():
+            st.error("Please enter a video ID first!")
+        else:
+            run = True; st.session_state['run_flag'] = True
+            st.info("🔍 **Video ID Search** - Searching for specific video")
 elif gemini_available:
     # CLIP mode with Gemini - show Enhance Query first, then Run Query
     if not st.session_state.query_enhanced:
@@ -2970,6 +3014,97 @@ if run:
 
         # Don't continue with CLIP search when BM25 is enabled
         st.stop()
+
+    # Video ID Search Mode
+    elif video_id_enabled:
+        if not video_id_input.strip():
+            st.error("Please enter a video ID first!")
+        else:
+            with log_container.container():
+                st.text(f"🔍 Searching for video ID: {video_id_input}")
+            
+            try:
+                with st.spinner(f"🔎 Searching for video {video_id_input}..."):
+                    # Get video information from media-info JSON
+                    video_info = get_video_info(video_id_input)
+                    
+                    if video_info:
+                        # Display video information
+                        st.success(f"✅ Found video: {video_id_input}")
+                        
+                        # Display video information in a single column layout
+                        st.markdown("### 📹 Video Information")
+                        
+                        # Create a row for thumbnail and basic info
+                        col_thumb, col_info = st.columns([0.3, 1])
+                        
+                        with col_thumb:
+                            # Display thumbnail if available
+                            if 'thumbnail_url' in video_info and video_info['thumbnail_url']:
+                                st.image(video_info['thumbnail_url'], caption="Video Thumbnail", width=400)
+                            else:
+                                st.markdown("*No thumbnail available*")
+                        
+                        with col_info:
+                            # Display basic information
+                            if 'title' in video_info:
+                                st.markdown(f"**Title:** {video_info['title']}")
+                            if 'author' in video_info:
+                                st.markdown(f"**Author:** {video_info['author']}")
+                            if 'length' in video_info:
+                                # Convert seconds to mm:ss format
+                                length_seconds = int(video_info['length'])
+                                minutes = length_seconds // 60
+                                seconds = length_seconds % 60
+                                length_formatted = f"{minutes:02d}:{seconds:02d}"
+                                st.markdown(f"**Length:** {length_formatted}")
+                            if 'publish_date' in video_info:
+                                st.markdown(f"**Publish Date:** {video_info['publish_date']}")
+                        
+                        # Video player in full width (moved above description)
+                        st.markdown("### 🎥 Video Player")
+                        
+                        # Get watch URL and display video player
+                        url = get_watch_url(video_id_input)
+                        if url:
+                            with st.popover("🎥 Watch Video", use_container_width=True):
+                                # Extract YouTube video ID from URL
+                                youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
+                                
+                                # Get actual FPS from CSV file
+                                actual_fps = get_fps_from_csv(video_id_input)
+                                
+                                # Start from beginning of video
+                                start_sec = 0
+                                
+                                # Display the video player
+                                components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=video_id_input), height=1500)
+                        else:
+                            st.error("No video URL available")
+                        
+                        # Display description in full width (moved below video player)
+                        if 'description' in video_info:
+                            st.markdown("### 📝 Description")
+                            st.markdown(video_info['description'])
+                        
+                        # Display additional information
+                        if 'keywords' in video_info and video_info['keywords']:
+                            st.markdown("### 🏷️ Keywords")
+                            keywords_text = ", ".join(video_info['keywords']) if isinstance(video_info['keywords'], list) else str(video_info['keywords'])
+                            st.markdown(keywords_text)
+                        
+                        if 'channel_url' in video_info:
+                            st.markdown(f"### 🔗 Channel URL: {video_info['channel_url']}")
+                        
+                    else:
+                        st.error(f"❌ Video ID '{video_id_input}' not found in media-info files")
+                        st.info("Please check the video ID format (e.g., K01_V001, L02_V005)")
+                        
+            except Exception as e:
+                st.error(f"Video ID search failed: {e}")
+            
+            # Don't continue with other search modes when video ID search is enabled
+            st.stop()
 
     # Prefer cached enhanced data if available
     if st.session_state.enhanced_data:
