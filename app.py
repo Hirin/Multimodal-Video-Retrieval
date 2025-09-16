@@ -22,6 +22,9 @@ import streamlit as st
 import streamlit.components.v1 as components
 from deep_translator import GoogleTranslator
 
+import sqlite3, math, re, unicodedata
+from collections import defaultdict
+
 # Reset watch mode keys on app start/refresh to default to Youtube Online
 if 'app_initialized' not in st.session_state:
     st.session_state.app_initialized = True
@@ -324,7 +327,7 @@ def download_video_dialog(video_id: str, local_video_root: Path):
         if not (kaggle_config_dir / "kaggle.json").exists():
             content_placeholder.error("Lỗi: Không tìm thấy file .kaggle/kaggle.json. Vui lòng đặt Kaggle API token của bạn vào đó.")
             return None
-                
+                                
         os.environ["KAGGLE_CONFIG_DIR"] = str(kaggle_config_dir)
 
         dataset_handle = "ndmhoang/hcm25-batch1-videos" if video_id.startswith("L") else "duyminhhong/hcmai25-batch2-videos"
@@ -332,7 +335,7 @@ def download_video_dialog(video_id: str, local_video_root: Path):
         local_video_root.mkdir(exist_ok=True)
 
         print(f"[KaggleHub] Downloading {remote_file_path} from {dataset_handle}...")
-                
+        
         # Download to system cache
         cached_path_str = kagglehub.dataset_download(dataset_handle, path=remote_file_path)
         cached_path = Path(cached_path_str)
@@ -377,6 +380,10 @@ def download_video_dialog(video_id: str, local_video_root: Path):
         # Clear dialog context before rerun
         if 'dialog_context' in st.session_state:
             del st.session_state['dialog_context']
+        # Preserve video cache when rerunning after download
+        if 'video_cache' in st.session_state:
+            # Keep the cache intact
+            pass
         st.rerun()  # Refresh the main UI to show the video player
         return local_video_path
 
@@ -418,6 +425,10 @@ def download_video_dialog(video_id: str, local_video_root: Path):
         # Clear dialog context before rerun
         if 'dialog_context' in st.session_state:
             del st.session_state['dialog_context']
+        # Preserve video cache when rerunning after error
+        if 'video_cache' in st.session_state:
+            # Keep the cache intact
+            pass
         st.rerun()  # Refresh the main UI
         return None
 
@@ -427,17 +438,28 @@ def download_video_from_kaggle(video_id: str, local_video_root: Path, placeholde
     local videos folder, and shows a user-friendly dialog on the UI during the process.
     """
     local_video_path = local_video_root / f"{video_id}.mp4"
+    
+    # Debug info
+    print(f"[Download] Checking video: {video_id}")
+    print(f"[Download] Local path: {local_video_path}")
+    print(f"[Download] Path exists: {local_video_path.exists()}")
+    
     if local_video_path.exists():
+        print(f"[Download] Video already exists, returning path")
         placeholder.empty()
         return local_video_path
     
+    print(f"[Download] Video not found, starting download dialog")
     # Show download dialog that runs download logic
     result = download_video_dialog(video_id, local_video_root)
     
+    print(f"[Download] Dialog result: {result}")
     # Return the path if it exists after download
     if result and result.exists():
+        print(f"[Download] Download successful, returning path")
         return result
     else:
+        print(f"[Download] Download failed or no result")
         return None
 
 
@@ -824,6 +846,242 @@ def load_times_for_video(video_id: str, n_feats: int) -> np.ndarray:
     t_end = float(t_all[-1]) if len(t_all) else float(n_feats - 1)
     return np.linspace(0.0, t_end, num=n_feats, dtype=float)
 
+def extract_seeds_from_query(query_vi: str) -> dict:
+    """
+    Phân tách thủ công query thành seeds khi Gemini không khả dụng.
+    Ví dụ: "câu 3 bài tập vận dụng AB" -> {"unigrams": [...], "phrases": [...]}
+    """
+    import re
+    
+    if not query_vi or not query_vi.strip():
+        return {"unigrams": [], "phrases": []}
+    
+    query = query_vi.strip().lower()
+    
+    # 1. Tách từ đơn (unigrams) - sử dụng thư viện stopwordsiso
+    try:
+        from stopwordsiso import stopwords
+        # Lấy stopwords cho tiếng Việt và tiếng Anh
+        stopwords_vi = stopwords(['vi', 'en'])
+    except ImportError:
+        # Fallback nếu không có thư viện stopwordsiso
+        stopwords_vi = {
+            'của', 'và', 'với', 'trong', 'cho', 'từ', 'đến', 'tại', 'về', 'theo',
+            'như', 'là', 'có', 'được', 'sẽ', 'đã', 'đang', 'sẽ', 'này', 'đó',
+            'các', 'những', 'một', 'hai', 'ba', 'bốn', 'năm', 'sáu', 'bảy', 'tám', 'chín', 'mười',
+            'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'
+        }
+    
+    # Tách từ bằng regex (bao gồm cả số và chữ)
+    words = re.findall(r'\b\w+\b', query)
+    unigrams = []
+    for word in words:
+        # Giữ lại số (dù chỉ 1 ký tự) và từ có >= 2 ký tự (không phải stopword)
+        if (word.isdigit() or len(word) >= 2) and word not in stopwords_vi:
+            unigrams.append(word)
+    
+    # 2. Tạo phrases từ các từ liền kề
+    phrases = []
+    words_clean = [w for w in words if (w.isdigit() or len(w) >= 2) and w not in stopwords_vi]
+    
+    # Phrases 2 từ
+    for i in range(len(words_clean) - 1):
+        phrase = f"{words_clean[i]} {words_clean[i+1]}"
+        phrases.append(phrase)
+    
+    # Phrases 3 từ (nếu có đủ từ)
+    for i in range(len(words_clean) - 2):
+        phrase = f"{words_clean[i]} {words_clean[i+1]} {words_clean[i+2]}"
+        phrases.append(phrase)
+    
+    # 3. Thêm các từ khóa đặc biệt dựa trên context
+    special_keywords = []
+    
+    # Từ khóa về số thứ tự
+    if re.search(r'\b(câu|bài|đề|số)\s*\d+\b', query):
+        special_keywords.extend(['câu', 'bài', 'đề', 'số'])
+    
+    # Từ khóa về bài tập
+    if re.search(r'\b(bài tập|bài|tập|exercise|task)\b', query):
+        special_keywords.extend(['bài tập', 'bài', 'tập'])
+    
+    # Từ khóa về vận dụng
+    if re.search(r'\b(vận dụng|ứng dụng|practice|apply)\b', query):
+        special_keywords.extend(['vận dụng', 'ứng dụng'])
+    
+    # Từ khóa về chữ cái
+    if re.search(r'\b[a-z]\b', query):
+        letters = re.findall(r'\b[a-z]\b', query)
+        special_keywords.extend(letters)
+    
+    # Thêm vào unigrams
+    for keyword in special_keywords:
+        if keyword not in unigrams:
+            unigrams.append(keyword)
+    
+    # 4. Giới hạn số lượng
+    unigrams = unigrams[:28]  # Giới hạn như Gemini
+    phrases = phrases[:18]    # Giới hạn như Gemini
+    
+    # 5. Loại bỏ trùng lặp và sắp xếp
+    unigrams = list(dict.fromkeys(unigrams))  # Giữ thứ tự, loại trùng
+    phrases = list(dict.fromkeys(phrases))    # Giữ thứ tự, loại trùng
+    
+    return {
+        "unigrams": unigrams,
+        "phrases": phrases
+    }
+
+def get_transcript_snippets_with_highlights(video_id: str, t0: float, t1: float, seeds: dict, top_n: int = 3) -> list:
+    """
+    Lấy top-N transcript snippets trong cửa sổ [t0, t1) và highlight seeds.
+    """
+    import sqlite3
+    
+    unigrams = seeds.get("unigrams", [])
+    phrases = seeds.get("phrases", [])
+    
+    # Tìm database path
+    db_path = None
+    if video_id.startswith("L"):
+        db_path = B1_DB_PATH
+    else:
+        db_path = B2_DB_PATH
+    
+    if not db_path or not os.path.exists(db_path):
+        return []
+    
+    snippets = []
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Lấy transcript trong cửa sổ thời gian
+        cursor.execute("""
+            SELECT text, t FROM docs 
+            WHERE video_id = ? AND t BETWEEN ? AND ?
+            ORDER BY t ASC
+        """, (video_id, t0, t1))
+        
+        rows = cursor.fetchall()
+        
+        # Highlight seeds trong mỗi snippet
+        for text, timestamp in rows[:top_n]:
+            if text and text.strip():
+                highlighted_text = highlight_seeds_in_text(text, unigrams, phrases)
+                snippets.append({
+                    "text": highlighted_text,
+                    "timestamp": timestamp,
+                    "original_text": text
+                })
+        
+        cursor.close()
+        conn.close()
+        
+    except Exception as e:
+        print(f"[TRANSCRIPT-SNIPPETS] Error: {e}")
+    
+    return snippets
+
+def highlight_seeds_in_text(text: str, unigrams: list, phrases: list) -> str:
+    """
+    Highlight seeds trong text với HTML tags giống BM25 mode và thêm background highlight.
+    """
+    import re
+    
+    if not text or not unigrams and not phrases:
+        return text
+    
+    highlighted_text = text
+    
+    # Highlight phrases trước (để tránh conflict với unigrams)
+    for phrase in phrases:
+        if phrase and phrase.strip():
+            # Escape special regex characters
+            escaped_phrase = re.escape(phrase)
+            # Highlight phrase với <b> tags và background highlight
+            pattern = re.compile(f'\\b{escaped_phrase}\\b(?![^<]*</b>)', re.IGNORECASE)
+            highlighted_text = pattern.sub(r'<b style="background-color: #ffff00; padding: 2px 4px; border-radius: 3px;">\g<0></b>', highlighted_text)
+    
+    # Highlight unigrams
+    for unigram in unigrams:
+        if unigram and unigram.strip():
+            # Escape special regex characters
+            escaped_unigram = re.escape(unigram)
+            # Highlight unigram với <b> tags và background highlight
+            pattern = re.compile(f'\\b{escaped_unigram}\\b(?![^<]*</b>)', re.IGNORECASE)
+            highlighted_text = pattern.sub(r'<b style="background-color: #ffff00; padding: 2px 4px; border-radius: 3px;">\g<0></b>', highlighted_text)
+    
+    return highlighted_text
+
+def get_frame_triplet(video_id: str, mid_time: float, delta: float = 10.0) -> list:
+    """
+    Lấy 3 frame: mid-delta, mid, mid+delta
+    """
+    frames = []
+    
+    # Tính toán thời gian cho 3 frame
+    times = [mid_time - delta, mid_time, mid_time + delta]
+    
+    for time in times:
+        # Đảm bảo thời gian không âm
+        time = max(0.0, time)
+        
+        # Tìm keyframe gần nhất
+        target_keyframe = timestamp_to_keyframe_number(video_id, time)
+        keyframe_img, actual_frame = find_best_keyframe(video_id, target_keyframe)
+        
+        frames.append({
+            "image": keyframe_img,
+            "frame_number": actual_frame,
+            "timestamp": time,
+            "label": f"{time:.1f}s"
+        })
+    
+    return frames
+
+def create_fallback_enhanced_data(query_vi: str) -> dict:
+    """
+    Tạo enhanced_data thủ công khi Gemini không khả dụng.
+    """
+    seeds = extract_seeds_from_query(query_vi)
+    
+    return {
+        "aspects": [],  # Transcript Seed Search không cần aspects
+        "seeds": seeds,
+        "source": "manual_fallback",
+        "error": None
+    }
+
+def _as_int(x, default=0):
+    try:
+        if x is None:
+            return default
+        if isinstance(x, bool):
+            return int(x)
+        if isinstance(x, (int, float)):
+            return int(x)
+        s = str(x).strip()
+        if not s:
+            return default
+        # chấp nhận "10", "10.0"
+        return int(float(s))
+    except Exception:
+        return default
+
+def _as_float(x, default=0.0):
+    try:
+        if x is None:
+            return default
+        if isinstance(x, (int, float)):
+            return float(x)
+        s = str(x).strip()
+        if not s:
+            return default
+        return float(s)
+    except Exception:
+        return default
+
 # =============================== CLIP TEXT ENCODER ======================================
 _CLIP_RT = {"model": None, "tokenizer": None, "device": None, "backend": None}
 
@@ -898,6 +1156,8 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
         return {"aspects": FALLBACK.get("aspects", []), "seeds": FALLBACK.get("seeds", {}), "source": "fallback", "error": "no_api_key"}
     sys_inst = (
         "You are a query builder for VIDEO RETRIEVAL / TRANSCRIPT SEARCH.\n\n"
+        "**NOTE**"
+        "- Avoid symbols like \"/\", \"\\\",... anywhere in the JSON output; they often trigger FST parsing errors."
         "TASK\n"
         "- INPUT: a NATURAL description (Vietnamese or English) of the target video content.\n"
         "- OUTPUT: a single VALID JSON object with two fields: \"aspects\" and \"seeds\".\n"
@@ -929,184 +1189,6 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
         "FEW-SHOT FORMAT (reference)\n"
         "- Each example has \"INPUT:\" and \"OUTPUT:\". Learn the structure and level of detail from them.\n"
         "- For a new description, output ONLY the JSON as in \"OUTPUT\" (do not print \"INPUT/OUTPUT\").\n\n"
-        "==================== FEW-SHOT EXAMPLES =====================\n\n"
-        "INPUT:\n"
-        "Trong một lễ hội trình diễn, các người mẫu lần lượt bước trên sàn. Mở màn là những bộ cổ phục \"Nhật Bình\" với đủ màu sắc. Trong đó, có cảnh người phụ nữ cầm những bông sen đứng đối diện nam người mẫu và cả 2 mặc áo màu xanh lá. Sau đó là các trang phục hiện đại hơn. Kết thúc bằng cảnh các người mẫu đồng loạt ra đứng sân khấu chào khán giả.\n\n"
-        "OUTPUT:\n"
-        "{\n"
-        "  \"aspects\": [\n"
-        "    {\n"
-        "      \"name\": \"Cổ phục Nhật Bình\",\n"
-        "      \"prompts\": [\n"
-        "        \"Imperial Vietnamese 'Nhat Binh' robe on runway\",\n"
-        "        \"traditional court costume showcased on catwalk\",\n"
-        "        \"models wearing royal Vietnamese attire in a fashion show\"\n"
-        "      ],\n"
-        "      \"weight\": 1.28\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Người phụ nữ cầm bông sen\",\n"
-        "      \"prompts\": [\n"
-        "        \"woman holding lotus flowers on stage\",\n"
-        "        \"female model holding lotus facing a male model\"\n"
-        "      ],\n"
-        "      \"weight\": 1.25\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Tông màu xanh lá đồng bộ\",\n"
-        "      \"prompts\": [\n"
-        "        \"matching green outfits on both models\",\n"
-        "        \"green clothing theme during runway scene\"\n"
-        "      ],\n"
-        "      \"weight\": 1.18\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Sàn catwalk / trình diễn thời trang\",\n"
-        "      \"prompts\": [\n"
-        "        \"fashion runway catwalk sequence\",\n"
-        "        \"models walking the stage in a fashion festival\",\n"
-        "        \"opening sequence of a fashion show\"\n"
-        "      ],\n"
-        "      \"weight\": 1.05\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Chào kết đồng loạt\",\n"
-        "      \"prompts\": [\n"
-        "        \"final bow with all models on stage\",\n"
-        "        \"group lineup at the end of the show\"\n"
-        "      ],\n"
-        "      \"weight\": 1.10\n"
-        "    }\n"
-        "  ],\n"
-        "  \"seeds\": {\n"
-        "    \"unigrams\": [\n"
-        "      \"lễ hội\",\"trình diễn\",\"sàn diễn\",\"catwalk\",\"người mẫu\",\n"
-        "      \"cổ phục\",\"nhật bình\",\"áo xanh\",\"xanh lá\",\"bông sen\",\n"
-        "      \"cầm sen\",\"đối diện\",\"nam người mẫu\",\"mở màn\",\"hiện đại\",\n"
-        "      \"kết thúc\",\"đồng loạt\",\"chào khán giả\",\"sân khấu\"\n"
-        "    ],\n"
-        "    \"phrases\": [\n"
-        "      \"áo nhật bình\",\n"
-        "      \"người phụ nữ cầm sen\",\n"
-        "      \"hai người mẫu áo xanh\",\n"
-        "      \"đối diện nam người mẫu\",\n"
-        "      \"mở màn cổ phục\",\n"
-        "      \"trang phục hiện đại hơn\",\n"
-        "      \"dàn người mẫu chào khán giả\",\n"
-        "      \"bước trên sàn diễn\"\n"
-        "    ]\n"
-        "  }\n"
-        "}\n\n"
-        "----------------------------------------------------------\n\n"
-        "INPUT:\n"
-        "Đoạn video đưa tin về việc ngư dân vừa câu được một con cá nhám với kích thước hiếm gặp, nặng đến 211kg. Đoạn tin đưa hình ảnh của con cá rất lớn treo trên một chiếc xe cẩu.\n\n"
-        "OUTPUT:\n"
-        "{\n"
-        "  \"aspects\": [\n"
-        "    {\n"
-        "      \"name\": \"Cá nhám khổng lồ 211kg\",\n"
-        "      \"prompts\": [\n"
-        "        \"massive shark weighing 211kg\",\n"
-        "        \"giant shark caught by fishermen in a news report\"\n"
-        "      ],\n"
-        "      \"weight\": 1.30\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Treo trên xe cẩu\",\n"
-        "      \"prompts\": [\n"
-        "        \"large fish hanging on a crane truck\",\n"
-        "        \"crane lifting the catch in reportage footage\"\n"
-        "      ],\n"
-        "      \"weight\": 1.22\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Ngư dân / bản tin thời sự\",\n"
-        "      \"prompts\": [\n"
-        "        \"news segment about fishermen at a port\",\n"
-        "        \"reportage coverage of a fishing catch\"\n"
-        "      ],\n"
-        "      \"weight\": 1.00\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Kích thước hiếm gặp\",\n"
-        "      \"prompts\": [\n"
-        "        \"rare unusually large specimen\",\n"
-        "        \"record-sized fish highlighted in news\"\n"
-        "      ],\n"
-        "      \"weight\": 1.12\n"
-        "    }\n"
-        "  ],\n"
-        "  \"seeds\": {\n"
-        "    \"unigrams\": [\n"
-        "      \"ngư dân\",\"cá nhám\",\"cá mập\",\"khổng lồ\",\"211kg\",\n"
-        "      \"hiếm gặp\",\"treo\",\"xe cẩu\",\"đưa tin\",\"bản tin\",\n"
-        "      \"con cá\",\"kích thước\",\"câu được\",\"cảng\",\"trọng lượng\",\n"
-        "      \"hiếm\",\"xe tải cẩu\"\n"
-        "    ],\n"
-        "    \"phrases\": [\n"
-        "      \"cá nhám nặng 211kg\",\n"
-        "      \"cá mập kích thước hiếm gặp\",\n"
-        "      \"treo trên xe cẩu\",\n"
-        "      \"đưa tin ngư dân\",\n"
-        "      \"hình ảnh con cá rất lớn\"\n"
-        "    ]\n"
-        "  }\n"
-        "}\n\n"
-        "----------------------------------------------------------\n\n"
-        "INPUT:\n"
-        "Đoạn video đưa tin về một cuộc đua giữa các kị sĩ. Một trong các phân cảnh là hình ảnh đồng cỏ xanh rộng, các kị sĩ cưỡi ngựa chạy trên cánh đồng này. Rất đông người đứng xem xung quanh khu vực đua. Trên đường đua có cắm những lá cờ màu đỏ.\n\n"
-        "OUTPUT:\n"
-        "{\n"
-        "  \"aspects\": [\n"
-        "    {\n"
-        "      \"name\": \"Cuộc đua kị sĩ / đua ngựa\",\n"
-        "      \"prompts\": [\n"
-        "        \"horse race with jockeys\",\n"
-        "        \"riders on horseback during competition\"\n"
-        "      ],\n"
-        "      \"weight\": 1.28\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Đồng cỏ xanh rộng\",\n"
-        "      \"prompts\": [\n"
-        "        \"wide green meadow landscape\",\n"
-        "        \"horses running across open field\"\n"
-        "      ],\n"
-        "      \"weight\": 1.15\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Khán giả đông xung quanh\",\n"
-        "      \"prompts\": [\n"
-        "        \"crowd of spectators watching the race\",\n"
-        "        \"many people standing around the track\"\n"
-        "      ],\n"
-        "      \"weight\": 1.10\n"
-        "    },\n"
-        "    {\n"
-        "      \"name\": \"Cờ đỏ dọc đường đua\",\n"
-        "      \"prompts\": [\n"
-        "        \"red flags along the race track\",\n"
-        "        \"track markers with red flags\"\n"
-        "      ],\n"
-        "      \"weight\": 1.20\n"
-        "    }\n"
-        "  ],\n"
-        "  \"seeds\": {\n"
-        "    \"unigrams\": [\n"
-        "      \"kị sĩ\",\"đua ngựa\",\"đồng cỏ\",\"xanh\",\"chạy\",\n"
-        "      \"đường đua\",\"cờ đỏ\",\"khán giả\",\"đông người\",\"cánh đồng\",\n"
-        "      \"cưỡi ngựa\",\"cuộc đua\",\"khu vực đua\",\"lá cờ\",\"xung quanh\"\n"
-        "    ],\n"
-        "    \"phrases\": [\n"
-        "      \"các kị sĩ cưỡi ngựa\",\n"
-        "      \"chạy trên đồng cỏ xanh\",\n"
-        "      \"cờ đỏ dọc đường đua\",\n"
-        "      \"rất đông người đứng xem\",\n"
-        "      \"cuộc đua kị sĩ\"\n"
-        "    ]\n"
-        "  }\n"
-        "}\n\n"
-        "================== END FEW-SHOT EXAMPLES ==================\n\n"
         "PROCESS FOR NEW INPUTS\n"
         "1) Decompose the description into aspects (subjects, actions, context, colors, props, numbers).\n"
         "2) Create 2–4 EN prompts per aspect, clear and useful for CLIP/Caption retrieval.\n"
@@ -1286,6 +1368,16 @@ def build_keyword_sets(query_vi: str, seeds: Dict, max_unigrams=28, max_phrases=
     q_any = " OR ".join(uni + [f'"{p}"' for p in phr]) if (uni or phr) else None
     q_phr = " OR ".join([f'"{p}"' for p in phr]) if phr else None
     return uni, phr, q_any, q_phr
+
+def build_bm25_query_from_seeds(query_vi: str, seeds: dict) -> str:
+    """
+    Gom unigrams + phrases (từ build_keyword_sets) thành một chuỗi MATCH duy nhất.
+    Ưu tiên phrase trước; nếu có cả hai thì OR lại.
+    """
+    uni, phr, q_any, q_phr = build_keyword_sets(query_vi, seeds, max_unigrams=28, max_phrases=18)
+    if q_phr and q_any:
+        return f"({q_phr}) OR ({q_any})"
+    return q_phr or q_any or ""
 
 def _connect_ro(db_path: str):
     return sqlite3.connect(db_path, check_same_thread=False)
@@ -1670,7 +1762,7 @@ def rerank_with_transcript_ultra_window(
     seeds: dict,
     top_candidates: int = 60,
     delta_sec: float = 10.0,
-    w_clip: float = 0.6, w_text: float = 0.4,
+    w_clip: float = 0.4, w_text: float = 0.6,
     text_weights: dict | None = None,
     verbose: bool = True, timing: bool = True,
     *,
@@ -1763,6 +1855,253 @@ def reorder_results_by_df(orig_results, ranked_df, top_videos=TOP_VIDEOS):
     order = ranked_df.head(top_videos)["video_id"].tolist()
     vid2r = {r["video_id"]: r for r in orig_results}
     return [vid2r[v] for v in order if v in vid2r]
+
+# ===================== Transcript Seed BM25 Search (FTS5) =====================
+
+def _vi_strip_accents(s: str) -> str:
+    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
+def _fts5_escape_term(term: str) -> str:
+    """
+    Escape 1 token cho FTS5 MATCH. Tránh ký tự đặc biệt.
+    Ví dụ: công an -> công AND an nếu bạn tách; ở đây ta treat nguyên cụm cho đơn giản.
+    """
+    term = term.strip()
+    # FTS5 support quotes for phrases; for single token keep as-is unless contains spaces.
+    if not term:
+        return ""
+    # Replace any double-quote in term by two double-quotes inside quoted phrase
+    if ' ' in term or '"' in term:
+        return '"' + term.replace('"', '""') + '"'
+    return term
+
+def _build_seed_fts5_query(seeds_json: dict) -> str:
+    """
+    Tạo 1 MATCH query dạng:  (u1 OR u2 OR ... OR "ph 1" OR "ph 2" ...)
+    - Ưu tiên: đơn giản, dễ tương thích tokenizer mặc định.
+    - Bạn có thể nâng cấp: thêm NEAR, AND, nhóm ưu tiên...
+    """
+    seeds = (seeds_json or {}).get("seeds", {})
+    unigrams = [w.strip().lower() for w in seeds.get("unigrams", []) if w.strip()]
+    phrases  = [p.strip().lower() for p in seeds.get("phrases", [])  if p.strip()]
+
+    parts = []
+    for u in unigrams:
+        parts.append(_fts5_escape_term(u))
+    for p in phrases:
+        parts.append(_fts5_escape_term(p))  # giữ nguyên ở dạng "phrase"
+    parts = [p for p in parts if p]
+
+    if not parts:
+        raise ValueError("No seeds provided (both unigrams and phrases are empty).")
+
+    return "(" + " OR ".join(parts) + ")"
+
+def _run_fts5_query(db_path: str, match_query: str, limit: int = 800):
+    """
+    Trả list các row dạng dict: {doc_id, video_id, frame_id, t, text, bm25}
+    - bm25(docs) nhỏ hơn là tốt hơn (ASC).
+    """
+    rows = []
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        sql = """
+            SELECT doc_id, video_id, frame_id, t, text, bm5.bm AS bm25
+            FROM (SELECT *, bm25(docs) AS bm FROM docs WHERE docs MATCH ?)
+            AS bm5
+            ORDER BY bm ASC
+            LIMIT ?;
+        """
+        limit_i = _as_int(limit, 800)
+        for r in conn.execute(sql, (str(match_query), limit_i)):
+            rows.append({
+                "doc_id":   r["doc_id"],
+                "video_id": r["video_id"],
+                "frame_id": r["frame_id"],
+                "t":        float(r["t"]),
+                "text":     r["text"] or "",
+                "bm25":     float(r["bm25"]),
+            })
+    finally:
+        conn.close()
+    return rows
+
+def _count_unigram_hits(text_low: str, unigrams_low: list[str]) -> int:
+    """
+    Đếm số unigram DISTINCT xuất hiện (đủ xài). Word-boundary tiếng Việt không hoàn hảo,
+    nhưng với FTS5 đã lọc ứng viên thì cách này nhanh và ổn.
+    """
+    hits = 0
+    seen = set()
+    for u in unigrams_low:
+        if not u or u in seen: 
+            continue
+        # r"\b...\b" hơi yếu với Unicode; dùng ' in text ' fallback:
+        # Ưu tiên regex, nếu không match thì thử chứa khoảng trắng/biên—đơn giản.
+        pat = r'(?<!\w)' + re.escape(u) + r'(?!\w)'
+        if re.search(pat, text_low):
+            seen.add(u)
+            hits += 1
+        else:
+            # fallback loose
+            if (" " + u + " ") in (" " + text_low + " "):
+                seen.add(u); hits += 1
+    return hits
+
+def _count_phrase_hits(text_low: str, phrases_low: list[str]) -> int:
+    cnt = 0
+    for p in phrases_low:
+        if p and p in text_low:
+            cnt += 1
+    return cnt
+
+def _window_key(t: float, window_sec: float, stride_sec: float) -> float:
+    """
+    Quy về mốc cửa sổ (start) theo stride. Ví dụ t=23, window=10, stride=5 -> 20.0
+    """
+    if stride_sec <= 0:
+        return 0.0
+    k = math.floor(t / stride_sec) * stride_sec
+    return max(0.0, k)
+
+def _resolve_bm25_dbpaths(db_batch1=None, db_batch2=None):
+    """
+    Ưu tiên: biến toàn cục B1_DB_PATH/B2_DB_PATH -> find_db_path(DATA_ROOT, 'b1'/'b2') -> fallback Windows.
+    """
+    # 1) ưu tiên đối số truyền vào
+    b1 = db_batch1 or globals().get("B1_DB_PATH")
+    b2 = db_batch2 or globals().get("B2_DB_PATH")
+
+    # 2) nếu vẫn thiếu, thử find_db_path
+    data_root = globals().get("DATA_ROOT", "")
+    if (not b1) and ("find_db_path" in globals()):
+        try:
+            b1 = find_db_path(data_root, "b1")
+        except Exception:
+            b1 = None
+    if (not b2) and ("find_db_path" in globals()):
+        try:
+            b2 = find_db_path(data_root, "b2")
+        except Exception:
+            b2 = None
+
+    # 3) fallback cuối cùng (Windows paths bạn đang dùng)
+    if not b1:
+        b1 = r"E:\HCMC-AI\b1\text_bm25.db"
+    if not b2:
+        b2 = r"E:\HCMC-AI\b2\text_bm25.db"
+
+    return b1, b2
+
+def transcript_seed_bm25_search(
+    enhanced_data: dict,
+    top_videos: int = 20,
+    window_sec: float = 10.0,
+    stride_sec: float = 5.0,
+    limit_videos: int = 600,
+    exclude_series: set | None = None,
+    db_batch1: str | None = None,
+    db_batch2: str | None = None,
+):
+    """
+    - Đọc seeds từ enhanced_data['seeds'] (VI).
+    - MATCH cả 2 DB FTS5; gom rows thành cửa sổ [w, w+window_sec).
+    - Điểm: score = uniq_unigram_hits + 2*phrase_hits (trên text gộp của cửa sổ).
+    - Với mỗi video: chọn 1 window tốt nhất.
+    - Trả: list[ {video_id, batch, t0, t1, score, bm25_best, doc_repr} ] sắp xếp theo score desc.
+    """
+    exclude_series = exclude_series or set()
+
+    top_videos  = max(1, _as_int(top_videos, 20))
+    window_sec  = max(0.1, _as_float(window_sec, 10.0))
+    stride_sec  = max(0.1, _as_float(stride_sec, 5.0))
+    limit_vids  = max(1, _as_int(limit_videos, 800))
+
+    seeds = (enhanced_data or {}).get("seeds", {})
+    unigrams = [w.strip().lower() for w in seeds.get("unigrams", []) if w.strip()]
+    phrases  = [p.strip().lower() for p in seeds.get("phrases", [])  if p.strip()]
+    if not unigrams and not phrases:
+        raise ValueError("Seeds are empty. Please Enhance the query first.")
+
+    match_query = _build_seed_fts5_query(enhanced_data)
+
+    # resolve path theo máy local
+    db_batch1, db_batch2 = _resolve_bm25_dbpaths(db_batch1, db_batch2)
+
+    # sanity check (thông báo rõ nếu thiếu file)
+    missing = []
+    if not (db_batch1 and os.path.exists(db_batch1)):
+        missing.append(("b1", db_batch1))
+    if not (db_batch2 and os.path.exists(db_batch2)):
+        missing.append(("b2", db_batch2))
+    if missing:
+        msg = " | ".join([f"{tag}: {path or '(None)'}" for tag, path in missing])
+        raise FileNotFoundError(f"BM25 DB not found -> {msg}")
+
+    # lấy ứng viên từ 2 batch
+    cand1 = _run_fts5_query(db_batch1, match_query, limit=limit_vids)
+    for r in cand1: r["_batch"] = "b1"
+    cand2 = _run_fts5_query(db_batch2, match_query, limit=limit_vids)
+    for r in cand2: r["_batch"] = "b2"
+
+    candidates = cand1 + cand2
+    if not candidates:
+        return []
+
+    # Gom theo (video_id, window_start)
+    buckets = defaultdict(list)
+    for r in candidates:
+        vid = r["video_id"]
+        if any(vid.startswith(prefix) for prefix in exclude_series):
+            continue
+        w0 = _window_key(r["t"], window_sec=window_sec, stride_sec=stride_sec)
+        buckets[(vid, w0)].append(r)
+
+    results_by_video_best = {}
+    for (vid, w0), rows in buckets.items():
+        # gộp text trong cửa sổ (chỉ rows có t ∈ [w0, w0+window_sec))
+        w1 = w0 + window_sec
+        rows_in = [x for x in rows if w0 <= x["t"] < w1]
+        if not rows_in:
+            continue
+        # gộp text để tính hit
+        merged_text = " ".join(x["text"] for x in rows_in).lower()
+        merged_text_noacc = _vi_strip_accents(merged_text)
+        # text_low = merged_text + " " + merged_text_noacc  # nếu muốn tăng recall
+        text_low = merged_text  # đơn giản trước; có thể nối thêm no-accents nếu thấy cần
+
+        uni_hits = _count_unigram_hits(text_low, unigrams)
+        phr_hits = _count_phrase_hits(text_low, phrases)
+        score = float(uni_hits + 2 * phr_hits)
+
+        # chọn 1 doc đại diện (bm25 tốt nhất) để có frame_id/t timestamp gần mid
+        rows_in_sorted = sorted(rows_in, key=lambda x: x["bm25"])
+        repr_doc = rows_in_sorted[0]
+        bm25_best = repr_doc["bm25"]
+        # chọn batch theo doc đại diện
+        batch = repr_doc.get("_batch", "?")
+
+        # pick best per video
+        cur_best = results_by_video_best.get(vid)
+        item = {
+            "video_id": vid,
+            "batch": batch,
+            "t0": w0,
+            "t1": w1,
+            "score": score,
+            "bm25_best": bm25_best,
+            "doc_repr": repr_doc,
+        }
+        if (cur_best is None) or (score > cur_best["score"]) or (
+            math.isclose(score, cur_best["score"]) and bm25_best < cur_best["bm25_best"]
+        ):
+            results_by_video_best[vid] = item
+
+    # Trả top theo score; nếu tie thì bm25_best asc
+    results = list(results_by_video_best.values())
+    results.sort(key=lambda x: (-x["score"], x["bm25_best"]))
+    return results[:top_videos]
 
 # =============================== MEDIA INFO (watch_url) ==================================
 # START: Code to be Replaced (FINAL, COMPLETE, AND FUNCTIONAL VERSION WITH 100% ORIGINAL JS)
@@ -2656,6 +2995,85 @@ with st.expander("⚙️ Setting", expanded=False):
         }
         st.rerun()
 
+    # Fused Formula Weight Settings
+    st.markdown("**Fused Formula Weights**")
+    st.markdown("*Công thức: fused = w_clip*(clip_total/num_aspects) + w_text*(w_any*hits_any + w_phr*hits_phr)*")
+    
+    col_w_clip, col_w_text = st.columns([1, 1])
+    with col_w_clip:
+        w_clip_slider = st.slider(
+            "w_clip (CLIP Weight)",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(st.session_state.get('W_CLIP', 0.6)),
+            step=0.05,
+            key="w_clip_slider",
+            help="Trọng số cho CLIP score trong công thức fused"
+        )
+    with col_w_text:
+        w_text_slider = st.slider(
+            "w_text (Text Weight)",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(st.session_state.get('W_TEXT', 0.4)),
+            step=0.05,
+            key="w_text_slider",
+            help="Trọng số cho Text score trong công thức fused"
+        )
+    
+    # Text weights (any/phr)
+    st.markdown("**Text Component Weights**")
+    col_w_any, col_w_phr = st.columns([1, 1])
+    with col_w_any:
+        w_any_slider = st.slider(
+            "w_any (Unigram Weight)",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(st.session_state.get('W_ANY', 0.5)),
+            step=0.05,
+            key="w_any_slider",
+            help="Trọng số cho unigram hits trong text score"
+        )
+    with col_w_phr:
+        w_phr_slider = st.slider(
+            "w_phr (Phrase Weight)",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(st.session_state.get('W_PHR', 0.5)),
+            step=0.05,
+            key="w_phr_slider",
+            help="Trọng số cho phrase hits trong text score"
+        )
+    
+    # Show current formula
+    current_w_clip = st.session_state.get('W_CLIP', 0.6)
+    current_w_text = st.session_state.get('W_TEXT', 0.4)
+    current_w_any = st.session_state.get('W_ANY', 0.5)
+    current_w_phr = st.session_state.get('W_PHR', 0.5)
+    
+    st.info(f"**Current Formula:** `fused = {current_w_clip}*(clip_total/num_aspects) + {current_w_text}*({current_w_any}*hits_any + {current_w_phr}*hits_phr)`")
+    
+    # Check if weights have changed
+    weights_changed = (
+        current_w_clip != w_clip_slider or
+        current_w_text != w_text_slider or
+        current_w_any != w_any_slider or
+        current_w_phr != w_phr_slider
+    )
+    
+    # Update weights button
+    col_sp2, col_btn_upd_weights = st.columns([5, 1])
+    with col_btn_upd_weights:
+        update_weights = st.button("Update Weights", type="secondary") if weights_changed else None
+    
+    if update_weights:
+        st.session_state['W_CLIP'] = w_clip_slider
+        st.session_state['W_TEXT'] = w_text_slider
+        st.session_state['W_ANY'] = w_any_slider
+        st.session_state['W_PHR'] = w_phr_slider
+        st.success("✅ Fused formula weights updated!")
+        st.rerun()
+
 # Row 4: Query input
 col_max_aspects, col_mode = st.columns([1.2, 2])
 
@@ -2678,21 +3096,41 @@ with col_max_aspects:
     )
 
 with col_mode:
-    search_mode = st.selectbox(
-        "🔎 Search Mode",
-        [
+    MODES = [
             "CLIP Multi-aspects Search",
             "CLIP Multi-aspects Search + Rerank",
+        "Transcript Seed Search (BM25)",
             "BM25 Keyword Search",
             "Search by Video ID",
-        ],
-        index=0,
-    )
+    ]
+    search_mode = st.selectbox("🔎 Search Mode", MODES, index=0, key="search_mode_sel")
 
-# Derive mode flags from selection
-rerank_enabled = (search_mode == "CLIP Multi-aspects Search + Rerank")
-bm25_enabled = (search_mode == "BM25 Keyword Search")
-video_id_enabled = (search_mode == "Search by Video ID")
+def _mode_key(name: str) -> str:
+    return {
+        "CLIP Multi-aspects Search"            : "clip",
+        "CLIP Multi-aspects Search + Rerank"   : "rerank",
+        "Transcript Seed Search (BM25)"        : "bm25_seed",
+        "BM25 Keyword Search"                  : "bm25_kw",
+        "Search by Video ID"                   : "vid",
+    }[name]
+
+active_key = _mode_key(search_mode)
+clip_enabled        = (search_mode == "CLIP Multi-aspects Search")
+rerank_enabled      = (search_mode == "CLIP Multi-aspects Search + Rerank")
+bm25_seed_enabled   = (search_mode == "Transcript Seed Search (BM25)")
+bm25_enabled        = (search_mode == "BM25 Keyword Search")
+video_id_enabled    = (search_mode == "Search by Video ID")
+
+def _clear_run_flags(except_mode_key: str | None = None):
+    for k in list(st.session_state.keys()):
+        if k.startswith("run_flag_") and (except_mode_key is None or k != f"run_flag_{except_mode_key}"):
+            st.session_state.pop(k, None)
+
+def _get_run_flag(mode_key: str) -> bool:
+    return bool(st.session_state.get(f"run_flag_{mode_key}", False))
+
+def _set_run_flag(mode_key: str, value: bool):
+    st.session_state[f"run_flag_{mode_key}"] = bool(value)
 
 # Reset run/caches when switching modes to prevent unintended auto-runs
 if 'last_mode' not in st.session_state:
@@ -2864,7 +3302,7 @@ st.markdown(
 if 'query_enhanced' not in st.session_state:
     st.session_state.query_enhanced = False
 if 'enhanced_data' not in st.session_state:
-    st.session_state.enhanced_data = None
+    st.session_state["enhanced_data"] = None
 
 # Row 5: Query buttons - Conditional display based on search mode
 # Persist run flag across reruns so UI remains in results state
@@ -2878,8 +3316,7 @@ gemini_available = 'turn_off_gemini' in st.session_state and gemini_configured a
 
 # Auto-run once after first enhance (so buttons switch to Run/Reset immediately)
 if st.session_state.get('auto_run_after_enhance', False):
-    run = True
-    st.session_state['run_flag'] = True  # persist results state across reruns
+    _set_run_flag(active_key, True)
     st.session_state['auto_run_after_enhance'] = False
 
 # Default values for Gemini parameters (when API is not configured)
@@ -2898,8 +3335,9 @@ if bm25_enabled:
         if not query_vi.strip():
             st.error("Please enter a query first!")
         else:
-            run = True; st.session_state['run_flag'] = True
+            _set_run_flag("bm25_kw", True)
             st.info("🔍 **BM25 Keyword Search** - Searching directly by keywords")
+
 elif video_id_enabled:
     # Video ID mode - always show Search Video directly (no enhancement needed)
     run_button = st.button("🔍 Search Video", width='stretch', type="primary")
@@ -2912,8 +3350,111 @@ elif video_id_enabled:
         if not video_id_input.strip():
             st.error("Please enter a video ID first!")
         else:
-            run = True; st.session_state['run_flag'] = True
+            _set_run_flag("vid", True)
             st.info("🔍 **Video ID Search** - Searching for specific video")
+
+elif bm25_seed_enabled:
+    # Transcript Seed Search mode - hỗ trợ cả Gemini và manual fallback
+    if gemini_available:
+        # Khi Gemini khả dụng: Enhance trước → Run/Reset
+        if not st.session_state.query_enhanced:
+            enhance_button = st.button("🌱 Enhance Query", type="primary", width='stretch')
+            if enhance_button:
+                _clear_run_flags()
+                if not query_vi.strip():
+                    st.error("Please enter a query first!")
+                else:
+                    with st.spinner("Enhancing query with Gemini..."):
+                        try:
+                            enhanced_data = extract_aspects_and_seeds_with_gemini(
+                                query_vi, gemini_temperature, gemini_top_p,
+                                gemini_model if 'gemini_model' in locals() else "gemini-2.5-flash",
+                                max_aspects_input.strip() if max_aspects_input.strip() else "N"
+                            )
+                            st.session_state["enhanced_data"] = enhanced_data
+                            st.session_state.query_enhanced = True
+                            _set_run_flag("bm25_seed", True)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to enhance query: {e}")
+        else:
+            # Sau khi enhance: hiện Run/Reset buttons
+            c1, c2 = st.columns([1,1])
+            with c1:
+                run_button = st.button("🚀 Run Query", type="secondary", width='stretch')
+            with c2:
+                reset_button = st.button("🔄 Reset Query", width='stretch')
+            if run_button:
+                _clear_run_flags(except_mode_key="bm25_seed")
+                _set_run_flag("bm25_seed", True)
+
+            if reset_button:
+                _clear_run_flags()
+                st.session_state.query_enhanced = False
+                st.session_state["enhanced_data"] = None
+                # Clear all caches when resetting
+                st.session_state.pop('clip_cache', None)
+                st.session_state.pop('bm25_cache', None)
+                st.session_state.pop('seed_cache', None)
+                st.session_state.pop('video_cache', None)
+                st.session_state.pop('rerank_cache', None)
+                st.rerun()
+    else:
+        # Khi Gemini không khả dụng: hiện Run Query trực tiếp với manual fallback
+        # Kiểm tra xem có cache cũ không
+        has_old_cache = (
+            st.session_state.query_enhanced and 
+            st.session_state.get("enhanced_data", {}).get("source") != "manual_fallback"
+        )
+        
+        if has_old_cache:
+            # Có cache cũ từ Gemini - hiện cả Run Query và Force Manual
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                run_button = st.button("🚀 Run Query", type="secondary", width='stretch')
+            with col2:
+                force_manual_button = st.button("🔧 Force Manual", type="primary", width='stretch')
+            
+            if run_button:
+                _clear_run_flags(except_mode_key="bm25_seed")
+                _set_run_flag("bm25_seed", True)
+            
+            if force_manual_button:
+                _clear_run_flags()
+                if not query_vi.strip():
+                    st.error("Please enter a query first!")
+                else:
+                    with st.spinner("Creating seeds manually..."):
+                        try:
+                            # Tạo enhanced_data mới với manual fallback
+                            enhanced_data = create_fallback_enhanced_data(query_vi)
+                            # Don't cache fallback data - only cache Gemini results
+                            # Use enhanced_data temporarily but don't persist it
+                            _set_run_flag("bm25_seed", True)
+                            st.info("🔧 **Using Manual Seed Extraction** - Seeds created from query analysis")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to create manual seeds: {e}")
+        else:
+            # Không có cache cũ - hiện Run Query trực tiếp
+            run_button = st.button("🚀 Run Query", type="primary", width='stretch')
+            if run_button:
+                _clear_run_flags()
+                if not query_vi.strip():
+                    st.error("Please enter a query first!")
+                else:
+                    with st.spinner("Creating seeds manually..."):
+                        try:
+                            # Luôn tạo enhanced_data mới khi Gemini tắt (không sử dụng cache cũ)
+                            enhanced_data = create_fallback_enhanced_data(query_vi)
+                            # Don't cache fallback data - only cache Gemini results
+                            # Use enhanced_data temporarily but don't persist it
+                            _set_run_flag("bm25_seed", True)
+                            st.info("🔧 **Using Manual Seed Extraction** - Seeds created from query analysis")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Failed to create manual seeds: {e}")
+
 elif gemini_available:
     # CLIP mode with Gemini - show Enhance Query first, then Run Query
     if not st.session_state.query_enhanced:
@@ -2935,12 +3476,12 @@ elif gemini_available:
                             gemini_model if 'gemini_model' in locals() else "gemini-2.5-flash",
                             max_aspects_input.strip() if max_aspects_input.strip() else "N"
                         )
-                        st.session_state.enhanced_data = enhanced_data
+                        st.session_state["enhanced_data"] = enhanced_data
                         st.session_state.query_enhanced = True
                         st.success("✅ Query enhanced successfully! Running search...")
                         # Trigger a rerun where Run/Reset buttons show and auto-run executes once
                         st.session_state['auto_run_after_enhance'] = True
-                        st.session_state['run_flag'] = True
+                        _set_run_flag("clip", True)
                         st.rerun()
                     except Exception as e:
                         st.error(f"Failed to enhance query: {e}")
@@ -2958,12 +3499,25 @@ elif gemini_available:
             for key in keys_to_reset:
                 del st.session_state[key]
                 
-            run = True; st.session_state['run_flag'] = True
+            _set_run_flag("clip", True)
+            
+            # Auto-rerank logic: If rerank mode is enabled and CLIP cache exists, also set rerank flag
+            if rerank_enabled and st.session_state.get("clip_cache"):
+                if st.session_state.get("debug_mode"):
+                    st.write(f"🔍 Debug - Auto-setting rerank flag (Run Query with rerank mode enabled)")
+                _set_run_flag("rerank", True)
+            
+            st.rerun()
         if reset_button:
             st.session_state.query_enhanced = False
-            st.session_state.enhanced_data = None
-            st.session_state['run_flag'] = False
+            st.session_state["enhanced_data"] = None
+            _clear_run_flags()
+            # Clear all caches when resetting
             st.session_state.pop('clip_cache', None)
+            st.session_state.pop('bm25_cache', None)
+            st.session_state.pop('seed_cache', None)
+            st.session_state.pop('video_cache', None)
+            st.session_state.pop('rerank_cache', None)
             st.rerun()
 else:
     # CLIP mode without Gemini - show Run Query directly with fallback
@@ -2977,23 +3531,47 @@ else:
         if not query_vi.strip():
             st.error("Please enter a query first!")
         else:
-            run = True; st.session_state['run_flag'] = True
+            # Clear any cached enhanced_data to prevent fallback caching
+            st.session_state.query_enhanced = False
+            st.session_state["enhanced_data"] = None
+            st.session_state.pop('clip_cache', None)
+            
+            _set_run_flag("clip", True)
+            
+            # Auto-rerank logic: If rerank mode is enabled and CLIP cache exists, also set rerank flag
+            if rerank_enabled and st.session_state.get("clip_cache"):
+                if st.session_state.get("debug_mode"):
+                    st.write(f"🔍 Debug - Auto-setting rerank flag (Run Query with rerank mode enabled)")
+                _set_run_flag("rerank", True)
+            
             # Use fallback translation directly
             st.info("ℹ️ **Using Fallback Translation** - Configure Gemini API for better results")
+            st.rerun()
 
 # Row 5: Logs expander
 log_exp = st.expander("📝 Logs", expanded=False)
 log_container = log_exp.empty()
+
+# Debug toggle
+debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.get("debug_mode", False))
+st.session_state["debug_mode"] = debug_mode
 
 def run_with_logs(fn, *args, **kwargs):
     buf = io.StringIO()
     try:
         import contextlib
         with contextlib.redirect_stdout(buf):
-            return fn(*args, **kwargs), buf
+            result = fn(*args, **kwargs)
+            print(f"[RUN_LOGS] Function {fn.__name__} completed successfully, result type: {type(result)}")
+            if result is None:
+                print(f"[RUN_LOGS] WARNING: Function {fn.__name__} returned None!")
+            return result, buf
     except Exception as e:
         print(f"[ERROR] {fn.__name__}: {e}")
-        return None, buf
+        import traceback
+        traceback.print_exc()
+        # Don't return None - let the exception propagate
+        raise e
     finally:
         pass
 
@@ -3002,29 +3580,133 @@ clip_results_container = st.empty()
 rerank_results_container = st.empty()
 
 # (Dynamic sidebar for sorting will be rendered after results are available in CLIP mode only)
+run = _get_run_flag(active_key)
+
+# Debug: Show current run flags
+if st.session_state.get("debug_mode", False):
+    st.write(f"🔍 Debug - Active key: {active_key}, Run flag: {run}")
+    st.write(f"🔍 Debug - All run flags: {[k for k in st.session_state.keys() if k.startswith('run_flag_')]}")
+
+# Smart cache clearing based on mode and data source (always run, not just when run=True)
+if st.session_state.get("debug_mode"):
+    st.write(f"🔍 Debug - Active key: {active_key}")
+
+# For Rerank mode: Auto-run rerank when switching to rerank mode if CLIP cache exists
+if active_key == "rerank" and st.session_state.get("clip_cache") and not st.session_state.get("rerank_cache"):
+    if st.session_state.get("debug_mode"):
+        st.write(f"🔍 Debug - Auto-running rerank (switching to rerank mode with CLIP cache)")
+    _set_run_flag("rerank", True)
+
+# For CLIP modes (CLIP, CLIP+Rerank): Only clear when explicitly requested (Reset button)
+# Don't clear CLIP cache when switching between CLIP modes
+if active_key not in ["clip", "rerank"]:
+    if debug_mode:
+        st.write(f"🔍 Debug - Clearing CLIP cache (switching away from CLIP modes)")
+        st.write(f"🔍 Debug - CLIP cache before clearing: {bool(st.session_state.get('clip_cache'))}")
+    st.session_state.pop('clip_cache', None)
+    if debug_mode:
+        st.write(f"🔍 Debug - CLIP cache after clearing: {bool(st.session_state.get('clip_cache'))}")
+else:
+    if debug_mode:
+        st.write(f"🔍 Debug - Preserving CLIP cache (staying in CLIP modes)")
+        st.write(f"🔍 Debug - CLIP cache exists: {bool(st.session_state.get('clip_cache'))}")
+
+# For BM25 Keyword Search: Only clear when explicitly requested (Reset button)
+if active_key != "bm25_kw":
+    if debug_mode:
+        st.write(f"🔍 Debug - Clearing BM25 cache (switching away from BM25 Keyword)")
+    st.session_state.pop('bm25_cache', None)
+
+# For Transcript Seed Search: Only clear when explicitly requested (Reset button)
+if active_key != "bm25_seed":
+    if debug_mode:
+        st.write(f"🔍 Debug - Clearing Seed cache (switching away from Transcript Seed)")
+    st.session_state.pop('seed_cache', None)
+
+# For Rerank: Only clear when switching away from CLIP modes (CLIP and CLIP+Rerank share cache)
+if active_key not in ["clip", "rerank"]:
+    if debug_mode:
+        st.write(f"🔍 Debug - Clearing Rerank cache (switching away from CLIP modes)")
+    st.session_state.pop('rerank_cache', None)
+
+# Smart clearing for enhanced_data based on source
+if st.session_state.get('enhanced_data'):
+    enhanced_source = st.session_state['enhanced_data'].get('source', 'unknown')
+    if debug_mode:
+        st.write(f"🔍 Debug - Enhanced data source: {enhanced_source}")
+    
+    # Clear fallback/manual data when switching modes
+    if enhanced_source in ['manual_fallback', 'fallback']:
+        if debug_mode:
+            st.write(f"🔍 Debug - Clearing fallback enhanced_data (source: {enhanced_source})")
+        st.session_state.pop('enhanced_data', None)
+        st.session_state.pop('query_enhanced', None)
+    # Keep Gemini data when switching modes (flexible usage)
+    elif enhanced_source == 'gemini':
+        if debug_mode:
+            st.write(f"🔍 Debug - Preserving Gemini enhanced_data (source: {enhanced_source})")
+    else:
+        if debug_mode:
+            st.write(f"🔍 Debug - Unknown enhanced_data source: {enhanced_source}, clearing")
+        st.session_state.pop('enhanced_data', None)
+        st.session_state.pop('query_enhanced', None)
 
 if run:
+    
     # Check if BM25 search is enabled
     if bm25_enabled:
         # BM25 Keyword Search Mode
         with log_container.container():
             st.text("🔍 Running BM25 keyword search...")
 
+        # Build cache key for BM25 results
         try:
-            with st.spinner("🔎 Đang search BM25..."):
-                bm25_results = bm25_search_videos(query_vi, limit=TOP_VIDEOS)
+            bm25_cache_key = json.dumps({
+                "query": query_vi,
+                "limit": TOP_VIDEOS,
+                "exclude_series": exclude_series_list,
+                "exclude_videos": exclude_videos_list,
+                "time_threshold": 30.0
+            }, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            bm25_cache_key = None
 
-                # Apply search filters
-                bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
+        # Check cache
+        bm25_cache_hit = bool(st.session_state.get("bm25_cache") and st.session_state["bm25_cache"].get("key") == bm25_cache_key)
+        
+        if bm25_cache_hit:
+            if debug_mode:
+                st.write(f"🔍 Debug - Using cached BM25 results")
+            bm25_results = st.session_state["bm25_cache"]["results"]
+        else:
+            try:
+                with st.spinner("🔎 Đang search BM25..."):
+                    bm25_results = bm25_search_videos(query_vi, limit=TOP_VIDEOS)
 
-                # Remove duplicate results that are too close in time
-                bm25_results = deduplicate_bm25_results(bm25_results, time_threshold=30.0)
+                    # Apply search filters
+                    bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
 
-            # Highlight is always enabled for BM25 results
+                    # Remove duplicate results that are too close in time
+                    bm25_results = deduplicate_bm25_results(bm25_results, time_threshold=30.0)
 
-            with log_container.container():
-                st.text("🔍 Running BM25 keyword search...")
-                st.text(f"Found {len(bm25_results)} results")
+                    # Save cache
+                    try:
+                        st.session_state["bm25_cache"] = {
+                            "key": bm25_cache_key,
+                            "results": bm25_results
+                        }
+                    except Exception:
+                        pass
+
+                    # Highlight is always enabled for BM25 results
+                    with log_container.container():
+                        st.text("🔍 Running BM25 keyword search...")
+                        st.text(f"Found {len(bm25_results)} results")
+
+            except Exception as e:
+                st.error(f"BM25 search failed: {e}")
+                st.info("Make sure BM25 databases exist in the data directory")
+                st.stop()
 
             if bm25_results:
                 # Display BM25 results
@@ -3068,6 +3750,7 @@ if run:
 
                         # Try to get watch URL and display video player
                         url = get_watch_url(vid)
+                    if url:
                         with st.popover("🎥 Watch Video", width='stretch'):
                             st.markdown(create_popover_css(), unsafe_allow_html=True)
                             col1, col2 = st.columns([2, 1]) # Căn lề radio qua phải
@@ -3118,17 +3801,234 @@ if run:
                                 else:
                                     # Error message is already shown by the download function
                                     pass
+                    else:
+                        st.markdown("No video URL available")
 
                         st.divider()
             else:
                 st.warning("No BM25 search results found. Try different keywords or check if BM25 databases exist.")
 
-        except Exception as e:
-            st.error(f"BM25 search failed: {e}")
-            st.info("Make sure BM25 databases exist in the data directory")
-
         # Don't continue with CLIP search when BM25 is enabled
         st.stop()
+
+    elif bm25_seed_enabled:
+        with log_container.container():
+            st.text("🌱 Running Transcript Seed Search (BM25)...")
+            if debug_mode:
+                st.write(f"🔍 Debug - BM25 Seed enabled: {bm25_seed_enabled}")
+                st.write(f"🔍 Debug - Active key: {active_key}")
+            
+            # Get enhanced_data - use cached Gemini data or create temporary fallback
+            enhanced_data = st.session_state.get("enhanced_data")
+            if not enhanced_data:
+                # Create temporary fallback data when Gemini is off
+                enhanced_data = create_fallback_enhanced_data(query_vi)
+            
+            source = enhanced_data.get("source", "unknown")
+            
+            # Kiểm tra xem có đang sử dụng cache cũ không
+            if source == "manual_fallback":
+                st.text("🔧 Using Manual Seed Extraction (Gemini disabled)")
+            elif source == "gemini":
+                st.text("🌱 Using Transcript Seeds from Gemini (BM25 over both batches)...")
+            else:
+                st.text("🌱 Using Transcript Seeds (BM25 over both batches)...")
+            
+            # Cảnh báo nếu đang sử dụng cache cũ khi Gemini tắt
+            if not gemini_available and source != "manual_fallback":
+                st.warning("⚠️ Using cached Gemini data. Click 'Reset Query' to use manual extraction.")
+            
+            # Hiển thị thông tin seeds
+            seeds_info = enhanced_data.get("seeds", {})
+            unigrams_count = len(seeds_info.get("unigrams", []))
+            phrases_count = len(seeds_info.get("phrases", []))
+            st.text(f"📊 Seeds: {unigrams_count} unigrams, {phrases_count} phrases")
+
+        SEEDS = enhanced_data.get("seeds", {})
+        if not SEEDS:
+            st.error("Seeds are missing. Please click **Enhance Query** first.")
+            st.stop()
+
+        # Build cache key for Transcript Seed Search results
+        try:
+            seed_cache_key = json.dumps({
+                "seeds": SEEDS,
+                "top_videos": TOP_VIDEOS,
+                "window_sec": WINDOW_SEC,
+                "stride_sec": DELTA_SEC,
+                "limit_videos": LIMIT_VIDEOS,
+                "exclude_series": EXCLUDE_SER,
+                "source": enhanced_data.get("source", "unknown")
+            }, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            seed_cache_key = None
+
+        # Check cache
+        seed_cache_hit = bool(st.session_state.get("seed_cache") and st.session_state["seed_cache"].get("key") == seed_cache_key)
+        
+        if seed_cache_hit:
+            if debug_mode:
+                st.write(f"🔍 Debug - Using cached Transcript Seed results")
+            seed_results = st.session_state["seed_cache"]["results"]
+        else:
+            try:
+                with st.spinner("🔎 Searching BM25 (seed windows across videos)..."):
+                    seed_results = transcript_seed_bm25_search(
+                        enhanced_data,
+                        top_videos=TOP_VIDEOS,
+                        window_sec=WINDOW_SEC,
+                        stride_sec=DELTA_SEC,
+                        limit_videos=LIMIT_VIDEOS,
+                        exclude_series=EXCLUDE_SER,
+                    )
+                    
+                    # Save cache
+                    try:
+                        st.session_state["seed_cache"] = {
+                            "key": seed_cache_key,
+                            "results": seed_results
+                        }
+                    except Exception:
+                        pass
+            except Exception as e:
+                st.error(f"Seed BM25 search failed: {e}")
+                st.stop()
+
+        # Hiển thị kết quả (layout mượn của CLIP grid tối giản + popover Watch Mode)
+        with clip_results_container.container():
+            st.subheader("🌱 Transcript Seed (BM25) Results")
+            
+            # Expander để hiển thị chi tiết seeds
+            with st.expander("🔍 View Generated Seeds", expanded=False):
+                seeds_info = enhanced_data.get("seeds", {})
+                aspects_info = enhanced_data.get("aspects", [])
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**Unigrams:**")
+                    unigrams = seeds_info.get("unigrams", [])
+                    if unigrams:
+                        for i, unigram in enumerate(unigrams, 1):
+                            st.text(f"{i}. {unigram}")
+                    else:
+                        st.text("No unigrams generated")
+                
+                with col2:
+                    st.markdown("**Phrases:**")
+                    phrases = seeds_info.get("phrases", [])
+                    if phrases:
+                        for i, phrase in enumerate(phrases, 1):
+                            st.text(f"{i}. {phrase}")
+                    else:
+                        st.text("No phrases generated")
+                
+                if aspects_info:
+                    st.markdown("**Aspects:**")
+                    for i, aspect in enumerate(aspects_info, 1):
+                        st.text(f"{i}. {aspect.get('name', 'Unknown')} (weight: {aspect.get('weight', 1.0)})")
+                        prompts = aspect.get('prompts', [])
+                        for j, prompt in enumerate(prompts, 1):
+                            st.text(f"   {j}. {prompt}")
+
+            if not seed_results:
+                st.info("No candidates from seed windows. Try Enhance again or relax filters.")
+            else:
+                rows = min(TOP_VIDEOS, len(seed_results))
+                for i in range(rows):
+                    r = seed_results[i]
+                    vid = r["video_id"]
+                    t0s, t1s = sec_to_mmss(r["t0"]), sec_to_mmss(r["t1"])
+                    t_mid = 0.5 * (r["t0"] + r["t1"])
+
+                    with st.container():
+                        st.markdown(f"**[{i+1}] {vid}** · window: {t0s} → {t1s} · score={r.get('score', 0):.3f}")
+
+                        # Lấy seeds để highlight
+                        seeds_info = enhanced_data.get("seeds", {})
+                        
+                        # Layout mới: Frame triplet ở trái, Transcript snippets ở phải
+                        col_left, col_right = st.columns([1, 2])
+                        
+                        with col_left:
+                            # 1. Frame Triplet
+                            st.markdown("**🎬 Frame Triplet:**")
+                            frames = get_frame_triplet(vid, t_mid, delta=10.0)
+                            
+                            if frames:
+                                for frame in frames:
+                                    if frame["image"] is not None:
+                                        st.image(frame["image"], caption=f"{frame['label']} (Frame {frame['frame_number']})", width='stretch')
+                                    else:
+                                        st.info(f"No frame at {frame['label']}")
+                            else:
+                                st.info("No frames available.")
+                        
+                        with col_right:
+                            # 2. Matched Transcript Snippets
+                            st.markdown("**📝 Matched Transcript Snippets:**")
+                            snippets = get_transcript_snippets_with_highlights(vid, r["t0"], r["t1"], seeds_info, top_n=3)
+                            
+                            if snippets:
+                                for j, snippet in enumerate(snippets, 1):
+                                    st.markdown(f"**{j}.** `{sec_to_mmss(snippet['timestamp'])}`")
+                                    # Thêm nền trắng cho transcript snippet
+                                    st.markdown(f"""
+                                    <div style="background-color: white; padding: 10px; border-radius: 5px; border: 1px solid #ddd; margin: 5px 0; color: black;">
+                                        {snippet["text"]}
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                                    st.markdown("---")
+                            else:
+                                st.info("No transcript snippets found in this window.")
+                        
+                        # Metadata info
+                        target_keyframe = timestamp_to_keyframe_number(vid, t_mid)
+                        keyframe_img, actual_frame = find_best_keyframe(vid, target_keyframe)
+                        st.markdown(f"**Metadata:** `Timestamp (mid): {sec_to_mmss(t_mid)} | Keyframe: {actual_frame}`")
+                        st.markdown(f"**Batch:** {r.get('batch','?').upper()} | **WindowSec={WINDOW_SEC} | Stride={DELTA_SEC}`")
+
+                    # Popover Watch Video (giữ UI giống các mode khác, radio ở góc phải)
+                    url = get_watch_url(vid)
+                    with st.popover("🎥 Watch Video", width='stretch'):
+                        # Reuse radio control như BM25 Keyword/CLIP
+                        col1, col2 = st.columns([2,1])
+                        with col1: st.markdown("")
+                        with col2:
+                            options = ("Youtube Online", "Kaggle Offline")
+                            def format_func(option):
+                                return f"▶️ {option}" if option=="Youtube Online" else (f"☁️ {option}" if option=="Kaggle Offline" else option)
+                            watch_mode = st.radio(
+                                "Watch Mode Select",
+                                options,
+                                key=f"watch_mode_seed_{vid}_{i}",
+                                horizontal=True,
+                                label_visibility="collapsed",
+                                format_func=format_func
+                            )
+
+                        start_sec = int(max(0, r["t0"]))
+                        actual_video_id = vid
+                        actual_fps = get_fps_from_csv(actual_video_id)
+                        
+                        if watch_mode == "Youtube Online":
+                            if url:
+                                youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
+                                components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
+                            else:
+                                st.warning(f"YouTube URL not found for {actual_video_id}. Try Kaggle Offline mode.")
+
+                        elif watch_mode == "Kaggle Offline":
+                            status_placeholder = st.empty()
+                            
+                            local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
+                            
+                            if local_path:
+                                file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
+                                components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
+                            else:
+                                # Error message is already shown by the download function
+                                pass
+                    st.divider()
 
     # Video ID Search Mode
     elif video_id_enabled:
@@ -3138,6 +4038,7 @@ if run:
             with log_container.container():
                 st.text(f"🔍 Searching for video ID: {video_id_input}")
             
+            # No cache for Video ID Search - always fetch fresh data
             try:
                 with st.spinner(f"🔎 Searching for video {video_id_input}..."):
                     video_info = get_video_info(video_id_input)
@@ -3200,13 +4101,19 @@ if run:
                                     st.warning(f"YouTube URL not found for {actual_video_id}. Try Kaggle Offline mode.")
 
                             elif watch_mode == "Kaggle Offline":
+                                print(f"[Video ID Search] Switching to Kaggle Offline mode for video: {actual_video_id}")
                                 status_placeholder = st.empty()
                                 
                                 local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
                                 
+                                print(f"[Video ID Search] Download result: {local_path}")
                                 if local_path:
                                     file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
+                                    print(f"[Video ID Search] Creating local player with URL: {file_url}")
                                     components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
+                                else:
+                                    print(f"[Video ID Search] No local path returned, download may have failed")
+                                    st.error(f"Failed to download video {actual_video_id}")
                         
                         if 'description' in video_info:
                             st.markdown("### 📝 Description")
@@ -3228,8 +4135,8 @@ if run:
         st.stop()
 
     # Prefer cached enhanced data if available
-    if st.session_state.enhanced_data:
-        spec = st.session_state.enhanced_data
+    if st.session_state.get("enhanced_data"):
+        spec = st.session_state.get("enhanced_data")
         if spec.get("source") == "gemini":
             gemini_log = "Query enhanced successfully with Gemini API (cached)"
         else:
@@ -3263,6 +4170,11 @@ if run:
         aspects, seeds = fallback_translate_and_create_aspects(query_vi)
         spec = {"aspects": aspects, "seeds": seeds}
         gemini_log = "Using fallback translation method (Gemini off or not configured)"
+        
+        # Don't cache fallback data - only cache Gemini results
+        # Clear any existing enhanced_data to prevent fallback caching
+        st.session_state.query_enhanced = False
+        st.session_state["enhanced_data"] = None
 
     # Show Gemini call result first
     with log_container.container():
@@ -3304,8 +4216,21 @@ if run:
     
     update_log()
 
-    # 1) CLIP rank (only if run_flag or cache already available)
-    if not st.session_state.get('run_flag') and not st.session_state.get('clip_cache'):
+    # 1) CLIP rank (only if in CLIP mode and run_flag_clip or cache already available)
+    if not (clip_enabled or rerank_enabled):
+        if debug_mode:
+            st.write(f"🔍 Debug - Not in CLIP mode. CLIP enabled: {clip_enabled}, Rerank enabled: {rerank_enabled}")
+        st.stop()
+        
+    run_flag_clip = _get_run_flag("clip")
+    has_cache = bool(st.session_state.get('clip_cache'))
+    
+    if debug_mode:
+        st.write(f"🔍 Debug - CLIP mode: {clip_enabled or rerank_enabled}, Rerank: {rerank_enabled}, Run flag: {run_flag_clip}, Cache: {has_cache}")
+    
+    if not run_flag_clip and not has_cache:
+        if debug_mode:
+            st.write(f"🔍 Debug - Stopping: No run flag and no cache")
         st.stop()
     clip_dirs = []
     if "b1" in DATASETS: clip_dirs.append(B1["clip_dir"])
@@ -3331,6 +4256,10 @@ if run:
         aspect_names = st.session_state["clip_cache"].get("aspect_names", [])
         aspect_weights = st.session_state["clip_cache"].get("aspect_weights", [1.0]*len(aspect_names))
     else:
+        if debug_mode:
+            st.write(f"🔍 Debug - Running CLIP search with {len(ASPECTS)} aspects")
+            st.write(f"🔍 Debug - ASPECTS: {ASPECTS}")
+        
         with st.spinner("🎬 Đang chạy CLIP search..."):
             (rank_out, buf2) = run_with_logs(
                 rank_videos_clip_window,
@@ -3508,9 +4437,39 @@ if run:
                     st.divider()
         # Ensure rerank section is empty when disabled
         rerank_results_container.empty()
+        
+        # Stop here - don't continue with CLIP execution
+        st.stop()
 
     # 2) Transcript rerank (only if enabled)
     if rerank_enabled:
+        if debug_mode:
+            st.write(f"🔍 Debug - Starting rerank, Results: {len(results) if results else 0}, SEEDS: {bool(SEEDS)}")
+        
+        # Get CLIP results from cache if not available
+        if not results or len(results) == 0:
+            if st.session_state.get("clip_cache"):
+                cached_clip_data = st.session_state["clip_cache"]
+                results = cached_clip_data.get("results", [])
+                if debug_mode:
+                    st.write(f"🔍 Debug - Using cached CLIP results: {len(results)} results")
+            else:
+                st.error("No CLIP results available for reranking. Please run CLIP search first.")
+                st.stop()
+        
+        # Get SEEDS from enhanced_data if not available
+        if not SEEDS or (not SEEDS.get("unigrams") and not SEEDS.get("phrases")):
+            if st.session_state.get("enhanced_data"):
+                SEEDS = st.session_state["enhanced_data"].get("seeds", {})
+                if debug_mode:
+                    st.write(f"🔍 Debug - Using cached SEEDS: {len(SEEDS.get('unigrams', []))} unigrams, {len(SEEDS.get('phrases', []))} phrases")
+            else:
+                st.error("No seeds available for reranking. Please enhance query with Gemini first.")
+                st.stop()
+        
+        # Auto-rerank logic will be handled in the main execution flow
+        # No need for separate Run Rerank button
+        
         # Do not render initial CLIP grid; proceed directly to reranked results
         clip_results_container.empty()
         # Add rerank start message to logs
@@ -3523,16 +4482,165 @@ if run:
                 st.text("Running rerank_with_transcript_ultra_window() ...")
         
         update_log()
-        with st.spinner("📑 Đang rerank theo transcript..."):
-            (reranked_df, buf3) = run_with_logs(
-                rerank_with_transcript_ultra_window,
-                results, query_vi, SEEDS,
-                60, DELTA_SEC,
-                0.6, 0.4,
-                {"any": 0.5, "phr": 0.5}, True, True,
-                workers=8, phrases_only=False, max_unigrams=16, max_phrases=10,
-                num_aspects=len(ASPECTS)
+        
+        # Build cache key for Rerank results
+        try:
+            rerank_cache_key = json.dumps({
+                "results": results,
+                "query": query_vi,
+                "seeds": SEEDS,
+                "top_candidates": 60,
+                "delta_sec": DELTA_SEC,
+                "w_clip": st.session_state.get('W_CLIP', 0.6),
+                "w_text": st.session_state.get('W_TEXT', 0.4),
+                "text_weights": {"any": st.session_state.get('W_ANY', 0.5), "phr": st.session_state.get('W_PHR', 0.5)},
+                "workers": 8,
+                "phrases_only": False,
+                "max_unigrams": 16,
+                "max_phrases": 10,
+                "num_aspects": len(ASPECTS)
+            }, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            rerank_cache_key = None
+
+        # Check cache
+        rerank_cache_hit = bool(st.session_state.get("rerank_cache") and st.session_state["rerank_cache"].get("key") == rerank_cache_key)
+        
+        if debug_mode:
+            st.write(f"🔍 Debug - Rerank cache: {rerank_cache_hit}")
+        
+        if rerank_cache_hit:
+            if debug_mode:
+                st.write(f"🔍 Debug - Using cached Rerank results")
+                cached_data = st.session_state["rerank_cache"]["results"]
+                st.write(f"🔍 Debug - Cached data type: {type(cached_data)}")
+                if hasattr(cached_data, 'shape'):
+                    st.write(f"🔍 Debug - Cached data shape: {cached_data.shape}")
+                elif hasattr(cached_data, '__len__'):
+                    st.write(f"🔍 Debug - Cached data length: {len(cached_data)}")
+            reranked_df = st.session_state["rerank_cache"]["results"]
+            buf3 = st.session_state["rerank_cache"].get("buf", io.StringIO())
+            
+            # Validate cached data - more comprehensive check
+            is_valid_cache = (
+                reranked_df is not None and 
+                not isinstance(reranked_df, tuple) and 
+                hasattr(reranked_df, 'shape') and 
+                len(reranked_df.shape) == 2 and 
+                reranked_df.shape[0] > 0 and 
+                reranked_df.shape[1] > 0
             )
+            
+            if not is_valid_cache:
+                if debug_mode:
+                    st.write(f"🔍 Debug - Cached data invalid, clearing cache and running fresh")
+                    st.write(f"🔍 Debug - Validation: None={reranked_df is None}, Tuple={isinstance(reranked_df, tuple)}, Shape={getattr(reranked_df, 'shape', 'No shape')}")
+                # Clear invalid cache
+                st.session_state.pop("rerank_cache", None)
+                # Run fresh rerank
+                with st.spinner("📑 Đang rerank theo transcript..."):
+                    try:
+                        if debug_mode:
+                            st.write(f"🔍 Debug - Running fresh rerank after cache validation failed")
+                        (reranked_df, buf3) = run_with_logs(
+                            rerank_with_transcript_ultra_window,
+                            results, query_vi, SEEDS,
+                            60, DELTA_SEC,
+                            st.session_state.get('W_CLIP', 0.6), st.session_state.get('W_TEXT', 0.4),
+                            {"any": st.session_state.get('W_ANY', 0.5), "phr": st.session_state.get('W_PHR', 0.5)}, True, True,
+                            workers=8, phrases_only=False, max_unigrams=16, max_phrases=10,
+                            num_aspects=len(ASPECTS)
+                        )
+                        
+                        # Validate result before saving cache
+                        if reranked_df is None or not hasattr(reranked_df, 'shape') or reranked_df.shape[0] == 0:
+                            if debug_mode:
+                                st.write(f"🔍 Debug - Fresh rerank result invalid: {type(reranked_df)}, shape: {getattr(reranked_df, 'shape', 'No shape')}")
+                            st.error("Fresh rerank failed - no valid results returned")
+                            st.stop()
+                        
+                        # Save cache only if result is valid
+                        try:
+                            st.session_state["rerank_cache"] = {
+                                "key": rerank_cache_key,
+                                "results": reranked_df,
+                                "buf": buf3
+                            }
+                            if debug_mode:
+                                st.write(f"🔍 Debug - Fresh rerank cache saved successfully, shape: {reranked_df.shape}")
+                        except Exception as e:
+                            if debug_mode:
+                                st.write(f"🔍 Debug - Fresh rerank cache save failed: {e}")
+                            
+                    except Exception as e:
+                        st.error(f"Rerank failed with error: {str(e)}")
+                        st.info("This might be due to missing transcript data or invalid seeds. Try running CLIP search without rerank first.")
+                        if debug_mode:
+                            st.write(f"🔍 Debug - Exception details: {type(e).__name__}: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+                        st.stop()
+        else:
+            if debug_mode:
+                st.write(f"🔍 Debug - Running fresh rerank")
+                st.write(f"🔍 Debug - Results type: {type(results)}, length: {len(results) if results else 'None'}")
+                st.write(f"🔍 Debug - SEEDS: {SEEDS}")
+                st.write(f"🔍 Debug - Query: {query_vi}")
+            with st.spinner("📑 Đang rerank theo transcript..."):
+                try:
+                    if debug_mode:
+                        st.write(f"🔍 Debug - Calling rerank_with_transcript_ultra_window...")
+                        # Check if required functions exist
+                        st.write(f"🔍 Debug - build_keyword_sets exists: {callable(build_keyword_sets)}")
+                        st.write(f"🔍 Debug - _alias_windows_and_dbpaths exists: {callable(_alias_windows_and_dbpaths)}")
+                        st.write(f"🔍 Debug - _count_one exists: {callable(_count_one)}")
+                        # Check database paths
+                        st.write(f"🔍 Debug - B1_DB_PATH exists: {os.path.exists(B1_DB_PATH) if 'B1_DB_PATH' in globals() else 'Not defined'}")
+                        st.write(f"🔍 Debug - B2_DB_PATH exists: {os.path.exists(B2_DB_PATH) if 'B2_DB_PATH' in globals() else 'Not defined'}")
+                    (reranked_df, buf3) = run_with_logs(
+                        rerank_with_transcript_ultra_window,
+                        results, query_vi, SEEDS,
+                        60, DELTA_SEC,
+                        st.session_state.get('W_CLIP', 0.6), st.session_state.get('W_TEXT', 0.4),
+                        {"any": st.session_state.get('W_ANY', 0.5), "phr": st.session_state.get('W_PHR', 0.5)}, True, True,
+                        workers=8, phrases_only=False, max_unigrams=16, max_phrases=10,
+                        num_aspects=len(ASPECTS)
+                    )
+                    
+                    if debug_mode:
+                        st.write(f"🔍 Debug - Rerank completed, result type: {type(reranked_df)}")
+                        if hasattr(reranked_df, 'shape'):
+                            st.write(f"🔍 Debug - Result shape: {reranked_df.shape}")
+                    
+                    # Validate result before saving cache
+                    if reranked_df is None or not hasattr(reranked_df, 'shape') or reranked_df.shape[0] == 0:
+                        if debug_mode:
+                            st.write(f"🔍 Debug - Fresh rerank result invalid: {type(reranked_df)}, shape: {getattr(reranked_df, 'shape', 'No shape')}")
+                        st.error("Fresh rerank failed - no valid results returned")
+                        st.stop()
+                    
+                    # Save cache only if result is valid
+                    try:
+                        st.session_state["rerank_cache"] = {
+                            "key": rerank_cache_key,
+                            "results": reranked_df,
+                            "buf": buf3
+                        }
+                        if debug_mode:
+                            st.write(f"🔍 Debug - Cache saved successfully, shape: {reranked_df.shape}")
+                    except Exception as e:
+                        if debug_mode:
+                            st.write(f"🔍 Debug - Cache save failed: {e}")
+                        
+                except Exception as e:
+                    st.error(f"Rerank failed with error: {str(e)}")
+                    st.info("This might be due to missing transcript data or invalid seeds. Try running CLIP search without rerank first.")
+                    if debug_mode:
+                        st.write(f"🔍 Debug - Exception details: {type(e).__name__}: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                    st.stop()
+        
         if reranked_df is None or isinstance(reranked_df, tuple):
             st.error("Rerank failed. See logs.")
             st.stop()
@@ -3613,13 +4721,28 @@ if run:
                             # Use the actual video ID from dataset (not from YouTube URL)
                             start_sec = int(max(0, win['t0']))
                             actual_video_id = vid  # Use the dataset video ID (e.g., K16_V013)
-                            youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
-                            
-                            # Get actual FPS from CSV file using dataset video ID
                             actual_fps = get_fps_from_csv(actual_video_id)
                             
-                            # Use the working YouTube API with FPS-based frame calculation
-                            components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
+                            if watch_mode == "Youtube Online":
+                                if url:
+                                    youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
+                                    # Use the working YouTube API with FPS-based frame calculation
+                                    components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
+                                else:
+                                    st.warning("YouTube URL not found for this video. Try Kaggle Offline mode.")
+                            
+                            elif watch_mode == "Kaggle Offline":
+                                # Chỉ cần một placeholder duy nhất cho spinner và các thông báo
+                                status_placeholder = st.empty()
+                                
+                                local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
+                                
+                                if local_path:
+                                    file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
+                                    components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
+                                else:
+                                    # Error message is already shown by the download function
+                                    pass
                     else:
                         st.markdown("No video URL available")
                     st.divider()

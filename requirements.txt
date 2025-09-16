@@ -18,6 +18,7 @@ google-genai>=0.8.0
 # Additional utilities
 requests>=2.25.0
 tqdm>=4.60.0
+stopwordsiso>=0.1.0
 
 # Development dependencies (optional)
 # pytest>=6.0.0
