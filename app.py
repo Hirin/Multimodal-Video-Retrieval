@@ -324,7 +324,7 @@ def download_video_dialog(video_id: str, local_video_root: Path):
         if not (kaggle_config_dir / "kaggle.json").exists():
             content_placeholder.error("Lỗi: Không tìm thấy file .kaggle/kaggle.json. Vui lòng đặt Kaggle API token của bạn vào đó.")
             return None
-                        
+                
         os.environ["KAGGLE_CONFIG_DIR"] = str(kaggle_config_dir)
 
         dataset_handle = "ndmhoang/hcm25-batch1-videos" if video_id.startswith("L") else "duyminhhong/hcmai25-batch2-videos"
@@ -332,7 +332,7 @@ def download_video_dialog(video_id: str, local_video_root: Path):
         local_video_root.mkdir(exist_ok=True)
 
         print(f"[KaggleHub] Downloading {remote_file_path} from {dataset_handle}...")
-        
+                
         # Download to system cache
         cached_path_str = kagglehub.dataset_download(dataset_handle, path=remote_file_path)
         cached_path = Path(cached_path_str)
@@ -520,6 +520,15 @@ def find_db_path(data_root, batch_name):
         if os.path.exists(path):
             return path
 
+    # Search recursively for .db files
+    search_pattern = f"{data_root}{batch_name}/**/*.db"
+    db_files = glob.glob(search_pattern, recursive=True)
+    bm25_files = [f for f in db_files if 'bm25' in f.lower() or 'text' in f.lower()]
+
+    if bm25_files:
+        return bm25_files[0]
+
+    return None
 
 B1_DB_PATH = find_db_path(DATA_ROOT, "b1")
 B2_DB_PATH = find_db_path(DATA_ROOT, "b2")
@@ -887,242 +896,14 @@ def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.
     if not (USE_LLM_ASPECTS and GEMINI_API_KEY):
         print("[Gemini] Using FALLBACK aspects/seeds (no API key)")
         return {"aspects": FALLBACK.get("aspects", []), "seeds": FALLBACK.get("seeds", {}), "source": "fallback", "error": "no_api_key"}
-    sys_inst = """
-Bạn là công cụ xây dựng truy vấn cho VIDEO RETRIEVAL / TRANSCRIPT SEARCH.
-
-NHIỆM VỤ
-- Đầu vào (INPUT): một mô tả TỰ NHIÊN (tiếng Việt hoặc tiếng Anh) về nội dung video cần tìm.
-- Đầu ra (OUTPUT): MỘT JSON HỢP LỆ duy nhất, gồm 2 trường: "aspects" và "seeds".
-- Tuyệt đối KHÔNG thêm giải thích, không thêm bình luận, không Markdown.
-
-RÀNG BUỘC ĐẦU RA
-- JSON dùng dấu ngoặc kép tiêu chuẩn (").
-- "aspects": mảng TỐI ĐA {max_aspects} phần tử. Mỗi phần tử là:
-  {{
-    "name": "<tên khía cạnh bằng TIẾNG VIỆT, ngắn gọn, phân biệt mạnh>",
-    "prompts": ["<2-4 prompt bằng TIẾNG ANH, mô tả rõ hình/khung cảnh/hành động>", ...],
-    "weight": <số thực từ 0.80 đến 1.30, 2 chữ số thập phân, phản ánh MỨC ĐỘ PHÂN BIỆT>
-  }}
-- "seeds": {{
-    "unigrams": [<= 28 từ khóa đơn TIẾNG VIỆT, không stopword phổ biến, ưu tiên đặc trưng],
-    "phrases":  [<= 18 cụm từ TIẾNG VIỆT (2–5 từ), mô tả giàu ngữ nghĩa/đặc trưng]
-  }}
-- Không vượt quá giới hạn số lượng. Không khóa học thuật/lý thuyết. Không trộn ngôn ngữ sai yêu cầu:
-  • aspects.name = VI | aspects.prompts = EN
-  • seeds.* = VI
-- Loại trùng lặp, chuẩn hóa khoảng trắng, giữ số/đơn vị nếu phân biệt mạnh (vd: "211kg").
-- Ưu tiên thuật ngữ/đặc trưng: thực thể, đồ vật, màu sắc, hành động, bối cảnh, đạo cụ, biểu tượng, con số hiếm.
-- Weight: 1.00 là trung tính. >1.15 cho khía cạnh "rất chẩn đoán" (độc nhất hiếm gặp). 0.90–0.99 cho khía cạnh phụ trợ/ít chắc chắn. Không dưới 0.80, không trên 1.30.
-
-CHIẾN LƯỢC TÓM TẮT
-1) Tách khung cảnh thành 4–7 khía cạnh độc lập, mỗi khía cạnh có 2–4 prompt EN miêu tả rõ ràng (phù hợp cả BM25/CLIP).
-2) Seeds VI:
-   - unigrams: danh từ/chủ thể/màu/sự kiện/đạo cụ (tránh hư từ). Ưu tiên từ phân biệt cao.
-   - phrases: kết hợp 2–5 từ tạo cụm đặc trưng (vd: "người phụ nữ cầm sen", "treo trên xe cẩu").
-3) Không suy diễn ngoài mô tả. Nếu mơ hồ, chọn phương án an toàn, vẫn điền JSON đủ cấu trúc.
-
-ĐỊNH DẠNG FEW-SHOT (tham khảo)
-- Mỗi ví dụ gồm khối "INPUT:" và "OUTPUT:". Học cách cấu trúc và độ chi tiết từ các ví dụ.
-- Khi xử lý mô tả mới, CHỈ trả JSON như phần "OUTPUT" (không in "INPUT/OUTPUT").
-
-==================== FEW-SHOT EXAMPLES ====================
-
-INPUT:
-Trong một lễ hội trình diễn, các người mẫu lần lượt bước trên sàn. Mở màn là những bộ cổ phục "Nhật Bình" với đủ màu sắc. Trong đó, có cảnh người phụ nữ cầm những bông sen đứng đối diện nam người mẫu và cả 2 mặc áo màu xanh lá. Sau đó là các trang phục hiện đại hơn. Kết thúc bằng cảnh các người mẫu đồng loạt ra đứng sân khấu chào khán giả.
-
-OUTPUT:
-{{
-  "aspects": [
-    {{
-      "name": "Cổ phục Nhật Bình",
-      "prompts": [
-        "Imperial Vietnamese 'Nhat Binh' robe on runway",
-        "traditional court costume showcased on catwalk",
-        "models wearing royal Vietnamese attire in a fashion show"
-      ],
-      "weight": 1.28
-    }},
-    {{
-      "name": "Người phụ nữ cầm bông sen",
-      "prompts": [
-        "woman holding lotus flowers on stage",
-        "female model holding lotus facing a male model"
-      ],
-      "weight": 1.25
-    }},
-    {{
-      "name": "Tông màu xanh lá đồng bộ",
-      "prompts": [
-        "matching green outfits on both models",
-        "green clothing theme during runway scene"
-      ],
-      "weight": 1.18
-    }},
-    {{
-      "name": "Sàn catwalk / trình diễn thời trang",
-      "prompts": [
-        "fashion runway catwalk sequence",
-        "models walking the stage in a fashion festival",
-        "opening sequence of a fashion show"
-      ],
-      "weight": 1.05
-    }},
-    {{
-      "name": "Chào kết đồng loạt",
-      "prompts": [
-        "final bow with all models on stage",
-        "group lineup at the end of the show"
-      ],
-      "weight": 1.10
-    }}
-  ],
-  "seeds": {{
-    "unigrams": [
-      "lễ hội","trình diễn","sàn diễn","catwalk","người mẫu",
-      "cổ phục","nhật bình","áo xanh","xanh lá","bông sen",
-      "cầm sen","đối diện","nam người mẫu","mở màn","hiện đại",
-      "kết thúc","đồng loạt","chào khán giả","sân khấu"
-    ],
-    "phrases": [
-      "áo nhật bình",
-      "người phụ nữ cầm sen",
-      "hai người mẫu áo xanh",
-      "đối diện nam người mẫu",
-      "mở màn cổ phục",
-      "trang phục hiện đại hơn",
-      "dàn người mẫu chào khán giả",
-      "bước trên sàn diễn"
-    ]
-  }}
-}}
-
-----------------------------------------------------------
-
-INPUT:
-Đoạn video đưa tin về việc ngư dân vừa câu được một con cá nhám với kích thước hiếm gặp, nặng đến 211kg. Đoạn tin đưa hình ảnh của con cá rất lớn treo trên một chiếc xe cẩu.
-
-OUTPUT:
-{{
-  "aspects": [
-    {{
-      "name": "Cá nhám khổng lồ 211kg",
-      "prompts": [
-        "massive shark weighing 211kg",
-        "giant shark caught by fishermen in a news report"
-      ],
-      "weight": 1.30
-    }},
-    {{
-      "name": "Treo trên xe cẩu",
-      "prompts": [
-        "large fish hanging on a crane truck",
-        "crane lifting the catch in reportage footage"
-      ],
-      "weight": 1.22
-    }},
-    {{
-      "name": "Ngư dân / bản tin thời sự",
-      "prompts": [
-        "news segment about fishermen at a port",
-        "reportage coverage of a fishing catch"
-      ],
-      "weight": 1.00
-    }},
-    {{
-      "name": "Kích thước hiếm gặp",
-      "prompts": [
-        "rare unusually large specimen",
-        "record-sized fish highlighted in news"
-      ],
-      "weight": 1.12
-    }}
-  ],
-  "seeds": {{
-    "unigrams": [
-      "ngư dân","cá nhám","cá mập","khổng lồ","211kg",
-      "hiếm gặp","treo","xe cẩu","đưa tin","bản tin",
-      "con cá","kích thước","câu được","cảng","trọng lượng",
-      "hiếm","xe tải cẩu"
-    ],
-    "phrases": [
-      "cá nhám nặng 211kg",
-      "cá mập kích thước hiếm gặp",
-      "treo trên xe cẩu",
-      "đưa tin ngư dân",
-      "hình ảnh con cá rất lớn"
-    ]
-  }}
-}}
-
-----------------------------------------------------------
-
-INPUT:
-Đoạn video đưa tin về một cuộc đua giữa các kị sĩ. Một trong các phân cảnh là hình ảnh đồng cỏ xanh rộng, các kị sĩ cưỡi ngựa chạy trên cánh đồng này. Rất đông người đứng xem xung quanh khu vực đua. Trên đường đua có cắm những lá cờ màu đỏ.
-
-OUTPUT:
-{{
-  "aspects": [
-    {{
-      "name": "Cuộc đua kị sĩ / đua ngựa",
-      "prompts": [
-        "horse race with jockeys",
-        "riders on horseback during competition"
-      ],
-      "weight": 1.28
-    }},
-    {{
-      "name": "Đồng cỏ xanh rộng",
-      "prompts": [
-        "wide green meadow landscape",
-        "horses running across open field"
-      ],
-      "weight": 1.15
-    }},
-    {{
-      "name": "Khán giả đông xung quanh",
-      "prompts": [
-        "crowd of spectators watching the race",
-        "many people standing around the track"
-      ],
-      "weight": 1.10
-    }},
-    {{
-      "name": "Cờ đỏ dọc đường đua",
-      "prompts": [
-        "red flags along the race track",
-        "track markers with red flags"
-      ],
-      "weight": 1.20
-    }}
-  ],
-  "seeds": {{
-    "unigrams": [
-      "kị sĩ","đua ngựa","đồng cỏ","xanh","chạy",
-      "đường đua","cờ đỏ","khán giả","đông người","cánh đồng",
-      "cưỡi ngựa","cuộc đua","khu vực đua","lá cờ","xung quanh"
-    ],
-    "phrases": [
-      "các kị sĩ cưỡi ngựa",
-      "chạy trên đồng cỏ xanh",
-      "cờ đỏ dọc đường đua",
-      "rất đông người đứng xem",
-      "cuộc đua kị sĩ"
-    ]
-  }}
-}}
-
-================== HẾT FEW-SHOT EXAMPLES ==================
-
-QUY TRÌNH KHI NHẬN ĐẦU VÀO MỚI
-1) Phân rã mô tả thành khía cạnh (chủ thể, hành động, bối cảnh, màu sắc, đạo cụ, con số).
-2) Tạo 2–4 prompts EN/khía cạnh, mô tả rõ ràng, có ích cho cả CLIP/Caption retrieval.
-3) Sinh seeds VI:
-   - unigrams: danh từ/thuật ngữ phân biệt, giữ số/đơn vị (vd: "211kg"), tránh hư từ.
-   - phrases: 2–5 từ, mô tả tổ hợp giàu thông tin (chủ thể + hành động + bối cảnh/màu/đạo cụ).
-4) Đặt weight 0.80–1.30 theo độ chẩn đoán/độ chắc chắn.
-5) Xuất MỘT JSON HỢP LỆ, không thêm bất cứ ký tự/giải thích nào khác.
-""".format(max_aspects=max_aspects)
-
+    sys_inst = (
+        "Bạn là công cụ xây dựng truy vấn cho video retrieval.\n"
+        "- Đầu vào: miêu tả TỰ NHIÊN (tiếng Việt/Anh).\n"
+        "- Đầu ra: JSON với hai trường: 'aspects' và 'seeds'.\n"
+        f"  * aspects: mảng {max_aspects} phần tử. Mỗi phần tử có name(VI), prompts(2-4 EN), weight trong khoảng [0.8, 1.3](Tự đánh giá).\n"
+        "  * seeds: { 'unigrams': ≤28, 'phrases': ≤18 } bằng TIẾNG VIỆT.\n"
+        "JSON hợp lệ, không kèm bình luận."
+    )
     payload = {"query_vi": query_vi}
     try:
         from google import genai
@@ -1670,182 +1451,6 @@ def bm25_search_videos(query: str, limit: int = 50):
     # Sort by score and return top results
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
-
-def transcript_seed_search(
-    query_vi: str,
-    seeds: dict,
-    top_candidates: int = 100,
-    delta_sec: float = 10.0,
-    text_weights: dict | None = None,
-    verbose: bool = True, timing: bool = True,
-    *,
-    workers: int = 8,
-    phrases_only: bool = False,
-    max_unigrams: int = 16, max_phrases: int = 10
-):
-    """
-    Search videos using only transcript seeds via BM25 database (no CLIP scores).
-    This is a pure text-based search using Gemini-generated seeds.
-    """
-    if text_weights is None:
-        text_weights = {"any": 0.3, "phr": 0.7}
-    t0 = time.perf_counter()
-    
-    print(f"[TRANSCRIPT-SEED] Searching BM25 databases with seeds: {seeds}")
-    
-    # Build search queries from seeds
-    q_any = seeds.get("unigrams", [])
-    q_phr = seeds.get("phrases", [])
-    
-    if not q_any and not q_phr:
-        print("[TRANSCRIPT-SEED] No seeds provided, returning empty results")
-        return pd.DataFrame(columns=["video_id", "hits_any", "hits_phr", "text_score", "fused", "t0", "t1"])
-    
-    # Search BM25 databases
-    all_results = []
-    
-    # Search in Batch 1 database
-    if "b1" in DATASETS:
-        db_path = find_db_path(DATA_ROOT, "b1")
-        if db_path and os.path.exists(db_path):
-            print(f"[TRANSCRIPT-SEED] Searching Batch 1 database: {db_path}")
-            try:
-                conn = sqlite3.connect(db_path, check_same_thread=False)
-                cursor = conn.cursor()
-                
-                # Search for unigrams
-                for unigram in q_any:
-                    try:
-                        cursor.execute("SELECT video_id, text FROM transcripts WHERE text MATCH ?", (unigram,))
-                        rows = cursor.fetchall()
-                        for video_id, text in rows:
-                            hits = text.lower().count(unigram.lower())
-                            all_results.append({
-                                "video_id": video_id,
-                                "seed": unigram,
-                                "seed_type": "unigram",
-                                "hits": hits
-                            })
-                    except Exception as e:
-                        print(f"[TRANSCRIPT-SEED] Error searching unigram '{unigram}': {e}")
-                
-                # Search for phrases
-                for phrase in q_phr:
-                    try:
-                        cursor.execute("SELECT video_id, text FROM transcripts WHERE text MATCH ?", (f'"{phrase}"',))
-                        rows = cursor.fetchall()
-                        for video_id, text in rows:
-                            hits = text.lower().count(phrase.lower())
-                            all_results.append({
-                                "video_id": video_id,
-                                "seed": phrase,
-                                "seed_type": "phrase",
-                                "hits": hits
-                            })
-                    except Exception as e:
-                        print(f"[TRANSCRIPT-SEED] Error searching phrase '{phrase}': {e}")
-                
-                cursor.close()
-                conn.close()
-            except Exception as e:
-                print(f"[TRANSCRIPT-SEED] Error accessing Batch 1 database: {e}")
-    
-    # Search in Batch 2 database
-    if "b2" in DATASETS:
-        db_path = find_db_path(DATA_ROOT, "b2")
-        if db_path and os.path.exists(db_path):
-            print(f"[TRANSCRIPT-SEED] Searching Batch 2 database: {db_path}")
-            try:
-                conn = sqlite3.connect(db_path, check_same_thread=False)
-                cursor = conn.cursor()
-                
-                # Search for unigrams
-                for unigram in q_any:
-                    try:
-                        cursor.execute("SELECT video_id, text FROM transcripts WHERE text MATCH ?", (unigram,))
-                        rows = cursor.fetchall()
-                        for video_id, text in rows:
-                            hits = text.lower().count(unigram.lower())
-                            all_results.append({
-                                "video_id": video_id,
-                                "seed": unigram,
-                                "seed_type": "unigram",
-                                "hits": hits
-                            })
-                    except Exception as e:
-                        print(f"[TRANSCRIPT-SEED] Error searching unigram '{unigram}': {e}")
-                
-                # Search for phrases
-                for phrase in q_phr:
-                    try:
-                        cursor.execute("SELECT video_id, text FROM transcripts WHERE text MATCH ?", (f'"{phrase}"',))
-                        rows = cursor.fetchall()
-                        for video_id, text in rows:
-                            hits = text.lower().count(phrase.lower())
-                            all_results.append({
-                                "video_id": video_id,
-                                "seed": phrase,
-                                "seed_type": "phrase",
-                                "hits": hits
-                            })
-                    except Exception as e:
-                        print(f"[TRANSCRIPT-SEED] Error searching phrase '{phrase}': {e}")
-                
-                cursor.close()
-                conn.close()
-            except Exception as e:
-                print(f"[TRANSCRIPT-SEED] Error accessing Batch 2 database: {e}")
-    
-    # Aggregate results by video_id
-    video_hits = {}
-    for result in all_results:
-        video_id = result["video_id"]
-        if video_id not in video_hits:
-            video_hits[video_id] = {"hits_any": 0, "hits_phr": 0}
-        
-        if result["seed_type"] == "unigram":
-            video_hits[video_id]["hits_any"] += result["hits"]
-        else:  # phrase
-            video_hits[video_id]["hits_phr"] += result["hits"]
-    
-    # Create DataFrame
-    if not video_hits:
-        print("[TRANSCRIPT-SEED] No results found")
-        return pd.DataFrame(columns=["video_id", "hits_any", "hits_phr", "text_score", "fused", "t0", "t1"])
-    
-    rows = []
-    for video_id, hits in video_hits.items():
-        rows.append({
-            "video_id": video_id,
-            "hits_any": hits["hits_any"],
-            "hits_phr": hits["hits_phr"],
-            "t0": 0.0,
-            "t1": 30.0
-        })
-    
-    df = pd.DataFrame(rows)
-    
-    def _minmax(x):
-        x = x.astype(float); mn, mx = x.min(), x.max()
-        if mx - mn < 1e-9:
-            return np.ones_like(x, dtype=float)
-        return (x - mn) / (mx - mn)
-    
-    df["any_n"] = _minmax(df["hits_any"].values)
-    df["phr_n"] = _minmax(df["hits_phr"].values)
-    a, b = text_weights["any"], text_weights["phr"]
-    df["text_score"] = a * df["any_n"] + b * df["phr_n"]
-    df["fused"] = df["text_score"]  # Pure text score, no CLIP component
-    df = df.sort_values("fused", ascending=False).reset_index(drop=True)
-    
-    if verbose:
-        print(f"[TRANSCRIPT-SEED] fused = {a}*hits_any + {b}*hits_phr | workers={workers} | phrases_only={phrases_only}")
-        print(f"[TRANSCRIPT-SEED] Found {len(df)} videos with hits")
-    
-    if timing:
-        print(f"[TRANSCRIPT-SEED] elapsed: {time.perf_counter() - t0:.3f}s (videos={len(df)})")
-    
-    return df
 
 def rerank_with_transcript_ultra_window(
     clip_results: list,
@@ -2866,7 +2471,6 @@ with col_mode:
         [
             "CLIP Multi-aspects Search",
             "CLIP Multi-aspects Search + Rerank",
-            "Transcript Seed Search",
             "BM25 Keyword Search",
             "Search by Video ID",
         ],
@@ -2875,7 +2479,6 @@ with col_mode:
 
 # Derive mode flags from selection
 rerank_enabled = (search_mode == "CLIP Multi-aspects Search + Rerank")
-transcript_seed_enabled = (search_mode == "Transcript Seed Search")
 bm25_enabled = (search_mode == "BM25 Keyword Search")
 video_id_enabled = (search_mode == "Search by Video ID")
 
@@ -3085,20 +2688,6 @@ if bm25_enabled:
         else:
             run = True; st.session_state['run_flag'] = True
             st.info("🔍 **BM25 Keyword Search** - Searching directly by keywords")
-elif transcript_seed_enabled:
-    # Transcript Seed Search mode - always show Run Query directly (no enhancement needed)
-    run_button = st.button("🔍 Run Transcript Seed Search", width='stretch', type="primary")
-    if run_button:
-        # Reset watch mode keys when starting new search
-        keys_to_reset = [key for key in st.session_state.keys() if key.startswith("watch_mode_")]
-        for key in keys_to_reset:
-            del st.session_state[key]
-            
-        if not query_vi.strip():
-            st.error("Please enter a query first!")
-        else:
-            run = True; st.session_state['run_flag'] = True
-            st.info("🔍 **Transcript Seed Search** - Searching using Gemini-generated seeds only")
 elif video_id_enabled:
     # Video ID mode - always show Search Video directly (no enhancement needed)
     run_button = st.button("🔍 Search Video", width='stretch', type="primary")
@@ -3327,135 +2916,6 @@ if run:
             st.info("Make sure BM25 databases exist in the data directory")
 
         # Don't continue with CLIP search when BM25 is enabled
-        st.stop()
-
-    # Transcript Seed Search Mode
-    elif transcript_seed_enabled:
-        with log_container.container():
-            st.text("🔍 Running Transcript Seed Search...")
-
-        try:
-            with st.spinner("🔎 Đang search transcript seeds..."):
-                # Get Gemini aspects and seeds
-                if gemini_available:
-                    with st.spinner("🤖 Enhancing query with Gemini..."):
-                        try:
-                            enhanced_data = extract_aspects_and_seeds_with_gemini(
-                                query_vi, gemini_temperature, gemini_top_p,
-                                gemini_model if 'gemini_model' in locals() else "gemini-2.5-flash",
-                                max_aspects_input.strip() if max_aspects_input.strip() else "N"
-                            )
-                            spec = enhanced_data
-                            gemini_log = f"Query enhanced successfully with Gemini"
-                        except Exception as e:
-                            err = str(e)
-                            spec = None
-                            gemini_log = f"Query enhance failed — using fallback translation{' | error: ' + err if err else ''}"
-                else:
-                    # Use fallback translation
-                    spec = None
-                    gemini_log = "Using fallback translation method (Gemini off or not configured)"
-
-                if spec:
-                    ASPECTS = spec.get("aspects", [])
-                    SEEDS = spec.get("seeds", {})
-                else:
-                    # Fallback: create minimal aspects and seeds
-                    aspects, seeds = fallback_translate_and_create_aspects(query_vi)
-                    ASPECTS = aspects
-                    SEEDS = seeds
-
-                # Run transcript seed search
-                transcript_results = transcript_seed_search(
-                    query_vi, SEEDS,
-                    top_candidates=100,
-                    delta_sec=10.0,
-                    text_weights={"any": 0.3, "phr": 0.7},
-                    verbose=True, timing=True,
-                    workers=8, phrases_only=False, max_unigrams=16, max_phrases=10
-                )
-
-            with log_container.container():
-                st.text("🔍 Running Transcript Seed Search...")
-                st.text(f"Found {len(transcript_results)} results")
-                st.text(f"Seeds used: {SEEDS}")
-
-            if not transcript_results.empty:
-                # Display transcript seed results
-                with clip_results_container.container():
-                    st.subheader("🔍 Transcript Seed Search Results")
-
-                    for i, row in transcript_results.head(TOP_VIDEOS).iterrows():
-                        vid = row["video_id"]
-                        hits_any = row["hits_any"]
-                        hits_phr = row["hits_phr"]
-                        text_score = row["text_score"]
-                        fused = row["fused"]
-
-                        st.markdown(f"**[{i+1}] {vid}** · Text Score: {fused:.3f} (Any: {hits_any}, Phr: {hits_phr})")
-
-                        # Get video info
-                        video_info = get_video_info(vid)
-                        if video_info:
-                            if 'title' in video_info:
-                                st.markdown(f"**Title:** {video_info['title']}")
-                            if 'description' in video_info:
-                                st.markdown(f"**Description:** {video_info['description'][:200]}...")
-
-                        # Watch Video button with popover
-                        with st.popover("🎥 Watch Video", width='stretch'):
-                            st.markdown(create_popover_css(), unsafe_allow_html=True)
-                            col1, col2 = st.columns([2, 1])
-                            with col1:
-                                st.markdown("")
-                            with col2:
-                                options = ("Youtube Online", "Kaggle Offline")
-                                def format_func(option):
-                                    if option == "Youtube Online":
-                                        return f"▶️ {option}"
-                                    elif option == "Kaggle Offline":
-                                        return f"☁️ {option}"
-                                    return option
-
-                                watch_mode = st.radio(
-                                    "Watch Mode Select",
-                                    options,
-                                    key=f"watch_mode_transcript_{vid}",
-                                    horizontal=True,
-                                    label_visibility="collapsed",
-                                    format_func=format_func
-                                )
-
-                            start_sec = 0
-                            actual_video_id = vid
-                            actual_fps = get_fps_from_csv(actual_video_id)
-                            
-                            if watch_mode == "Youtube Online":
-                                url = get_watch_url(actual_video_id)
-                                if url:
-                                    youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
-                                    components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
-                                else:
-                                    st.warning(f"YouTube URL not found for {actual_video_id}. Try Kaggle Offline mode.")
-
-                            elif watch_mode == "Kaggle Offline":
-                                status_placeholder = st.empty()
-                                
-                                local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
-                                
-                                if local_path:
-                                    file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
-                                    components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
-                        
-                        st.divider()
-            else:
-                st.warning("No transcript seed search results found. Try different query or check if transcript files exist.")
-
-        except Exception as e:
-            st.error(f"Transcript seed search failed: {e}")
-            st.info("Make sure transcript files exist in the data directory")
-
-        # Don't continue with CLIP search when transcript seed is enabled
         st.stop()
 
     # Video ID Search Mode
