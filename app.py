@@ -58,116 +58,7 @@ def create_popover_css():
     </style>
     """
 
-def create_loading_overlay_html(message: str):
-    """Create a custom loading overlay as HTML component"""
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            * {{
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-            }}
-            html, body {{
-                width: 100%;
-                height: 100%;
-                overflow: hidden;
-            }}
-            @keyframes spin {{
-                0% {{ transform: rotate(0deg); }}
-                100% {{ transform: rotate(360deg); }}
-            }}
-            @keyframes pulse {{
-                0%, 100% {{ transform: scale(1); }}
-                50% {{ transform: scale(1.05); }}
-            }}
-            @keyframes progress {{
-                0% {{ width: 0%; }}
-                50% {{ width: 70%; }}
-                100% {{ width: 100%; }}
-            }}
-            .loading-overlay {{
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100vw;
-                height: 100vh;
-                background: rgba(0, 0, 0, 0.85);
-                backdrop-filter: blur(10px);
-                z-index: 999999;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            }}
-            .loading-card {{
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                padding: 80px 100px;
-                border-radius: 30px;
-                box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5);
-                text-align: center;
-                color: white;
-                min-width: 600px;
-                max-width: 700px;
-                width: 90%;
-                animation: pulse 2s infinite;
-            }}
-            .loading-icon {{
-                font-size: 80px;
-                margin-bottom: 40px;
-                animation: spin 1s linear infinite;
-            }}
-            .loading-title {{
-                margin: 0 0 20px 0;
-                font-size: 36px;
-                font-weight: 700;
-            }}
-            .loading-message {{
-                margin: 0;
-                font-size: 20px;
-                opacity: 0.9;
-                line-height: 1.6;
-            }}
-            .progress-bar {{
-                margin-top: 40px;
-                width: 100%;
-                height: 8px;
-                background: rgba(255, 255, 255, 0.3);
-                border-radius: 4px;
-                overflow: hidden;
-            }}
-            .progress-fill {{
-                height: 100%;
-                background: linear-gradient(90deg, #00d4ff, #00ff88);
-                border-radius: 4px;
-                animation: progress 2s ease-in-out infinite;
-            }}
-            .loading-subtitle {{
-                margin-top: 25px;
-                font-size: 16px;
-                opacity: 0.7;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="loading-overlay">
-            <div class="loading-card">
-                <div class="loading-icon">⏳</div>
-                <h2 class="loading-title">Đang tải video...</h2>
-                <p class="loading-message">{message}</p>
-                <div class="progress-bar">
-                    <div class="progress-fill"></div>
-                </div>
-                <div class="loading-subtitle">Vui lòng đợi trong giây lát...</div>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+
 
 def create_loading_overlay(message: str):
     """Create a custom loading overlay with blur background"""
@@ -2736,10 +2627,19 @@ if not st.session_state.get("_local_video_server_started"):
     ensure_server_once(flask_app, port=8801)
 
 # =============================== STREAMLIT UI ============================================
-st.set_page_config(page_title="HCMC AI 2025 – CLIP + BM25 Search", layout="wide")
+st.set_page_config(page_title="Video Retrieval - CLIP + BM25 Search", layout="wide")
+
+# Pre-load CLIP model for faster search
+with st.spinner("🔄 Loading CLIP model..."):
+    try:
+        ensure_clip_text_encoder()
+        st.success("✅ CLIP model loaded successfully!")
+    except Exception as e:
+        st.error(f"❌ Failed to load CLIP model: {e}")
+        st.warning("⚠️ CLIP search will be slower on first use")
 
 # Row 1: Title
-st.title("HCMC AI 2025 – CLIP + BM25 Search")
+st.title("Video Retrieval - CLIP + BM25 Search")
 st.markdown("*Choose your search mode: **CLIP visual search** or **BM25 text search***")
 
 # Row 2: Filter options (collapsible)
@@ -2997,7 +2897,8 @@ with st.expander("⚙️ Setting", expanded=False):
 
     # Fused Formula Weight Settings
     st.markdown("**Fused Formula Weights**")
-    st.markdown("*Công thức: fused = w_clip*(clip_total/num_aspects) + w_text*(w_any*hits_any + w_phr*hits_phr)*")
+    st.markdown("**Công thức:**")
+    st.latex(r"fused = w_{clip} \cdot \frac{clip_{total}}{num_{aspects}} + w_{text} \cdot (w_{any} \cdot hits_{any} + w_{phr} \cdot hits_{phr})")
     
     col_w_clip, col_w_text = st.columns([1, 1])
     with col_w_clip:
@@ -3005,7 +2906,7 @@ with st.expander("⚙️ Setting", expanded=False):
             "w_clip (CLIP Weight)",
             min_value=0.0,
             max_value=1.0,
-            value=float(st.session_state.get('W_CLIP', 0.6)),
+            value=float(st.session_state.get('W_CLIP', 0.4)),
             step=0.05,
             key="w_clip_slider",
             help="Trọng số cho CLIP score trong công thức fused"
@@ -3015,7 +2916,7 @@ with st.expander("⚙️ Setting", expanded=False):
             "w_text (Text Weight)",
             min_value=0.0,
             max_value=1.0,
-            value=float(st.session_state.get('W_TEXT', 0.4)),
+            value=float(st.session_state.get('W_TEXT', 0.6)),
             step=0.05,
             key="w_text_slider",
             help="Trọng số cho Text score trong công thức fused"
@@ -3029,7 +2930,7 @@ with st.expander("⚙️ Setting", expanded=False):
             "w_any (Unigram Weight)",
             min_value=0.0,
             max_value=1.0,
-            value=float(st.session_state.get('W_ANY', 0.5)),
+            value=float(st.session_state.get('W_ANY', 0.3)),
             step=0.05,
             key="w_any_slider",
             help="Trọng số cho unigram hits trong text score"
@@ -3039,17 +2940,17 @@ with st.expander("⚙️ Setting", expanded=False):
             "w_phr (Phrase Weight)",
             min_value=0.0,
             max_value=1.0,
-            value=float(st.session_state.get('W_PHR', 0.5)),
+            value=float(st.session_state.get('W_PHR', 0.7)),
             step=0.05,
             key="w_phr_slider",
             help="Trọng số cho phrase hits trong text score"
         )
     
     # Show current formula
-    current_w_clip = st.session_state.get('W_CLIP', 0.6)
-    current_w_text = st.session_state.get('W_TEXT', 0.4)
-    current_w_any = st.session_state.get('W_ANY', 0.5)
-    current_w_phr = st.session_state.get('W_PHR', 0.5)
+    current_w_clip = st.session_state.get('W_CLIP', 0.4)
+    current_w_text = st.session_state.get('W_TEXT', 0.6)
+    current_w_any = st.session_state.get('W_ANY', 0.3)
+    current_w_phr = st.session_state.get('W_PHR', 0.7)
     
     st.info(f"**Current Formula:** `fused = {current_w_clip}*(clip_total/num_aspects) + {current_w_text}*({current_w_any}*hits_any + {current_w_phr}*hits_phr)`")
     
@@ -4491,9 +4392,9 @@ if run:
                 "seeds": SEEDS,
                 "top_candidates": 60,
                 "delta_sec": DELTA_SEC,
-                "w_clip": st.session_state.get('W_CLIP', 0.6),
-                "w_text": st.session_state.get('W_TEXT', 0.4),
-                "text_weights": {"any": st.session_state.get('W_ANY', 0.5), "phr": st.session_state.get('W_PHR', 0.5)},
+                "w_clip": st.session_state.get('W_CLIP', 0.4),
+                "w_text": st.session_state.get('W_TEXT', 0.6),
+                "text_weights": {"any": st.session_state.get('W_ANY', 0.3), "phr": st.session_state.get('W_PHR', 0.7)},
                 "workers": 8,
                 "phrases_only": False,
                 "max_unigrams": 16,
@@ -4546,7 +4447,7 @@ if run:
                             rerank_with_transcript_ultra_window,
                             results, query_vi, SEEDS,
                             60, DELTA_SEC,
-                            st.session_state.get('W_CLIP', 0.6), st.session_state.get('W_TEXT', 0.4),
+                            st.session_state.get('W_CLIP', 0.4), st.session_state.get('W_TEXT', 0.6),
                             {"any": st.session_state.get('W_ANY', 0.5), "phr": st.session_state.get('W_PHR', 0.5)}, True, True,
                             workers=8, phrases_only=False, max_unigrams=16, max_phrases=10,
                             num_aspects=len(ASPECTS)
@@ -4601,7 +4502,7 @@ if run:
                         rerank_with_transcript_ultra_window,
                         results, query_vi, SEEDS,
                         60, DELTA_SEC,
-                        st.session_state.get('W_CLIP', 0.6), st.session_state.get('W_TEXT', 0.4),
+                        st.session_state.get('W_CLIP', 0.4), st.session_state.get('W_TEXT', 0.6),
                         {"any": st.session_state.get('W_ANY', 0.5), "phr": st.session_state.get('W_PHR', 0.5)}, True, True,
                         workers=8, phrases_only=False, max_unigrams=16, max_phrases=10,
                         num_aspects=len(ASPECTS)

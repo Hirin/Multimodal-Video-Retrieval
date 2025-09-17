@@ -1,26 +1,54 @@
-# HCMC AI 2025 – CLIP + BM25 Search (Streamlit App)
+# Video Retrieval - CLIP + BM25 Search & Video Annotation (Streamlit App)
 
-Ứng dụng truy xuất nhanh, đơn giản cho bộ dữ liệu video AIC25 / HCMC AI 2025.  
-Kết hợp **tìm kiếm cửa sổ đa khía cạnh CLIP** với **BM25 transcript/OCR** và tùy chọn **bộ mở rộng truy vấn Gemini**.
+Ứng dụng truy xuất và chú thích video toàn diện cho bộ dữ liệu video AIC25.  
+Kết hợp **tìm kiếm cửa sổ đa khía cạnh CLIP** với **BM25 transcript/OCR**, **bộ mở rộng truy vấn Gemini**, và **hệ thống chú thích video tương tác**.
 
 ---
 
 ## ✨ Chức năng của ứng dụng
 
+### 🔍 **Tìm kiếm Video**
 - **Tìm kiếm CLIP Đa khía cạnh**: Mã hóa nhiều prompt khía cạnh và tìm **cửa sổ thời gian** tốt nhất cho mỗi video bằng cách sử dụng sliding max-pool theo khía cạnh, sau đó tổng hợp với trọng số.
 - **Sắp xếp lại Transcript ("Ultra-Window")**: Đối với các ứng viên hàng đầu, mở cửa sổ chặt `[t0-Δ, t1+Δ]` và đếm **FTS5 hits** cho **unigrams/cụm từ** tiếng Việt được suy ra từ truy vấn + seeds, sau đó kết hợp `clip_n` và `text_score`.
 - **Tìm kiếm từ khóa BM25 (độc lập)**: Truy vấn transcript/OCR trực tiếp bằng cú pháp FTS5, với highlighting cụm từ và preview keyframe.
 - **Bộ mở rộng truy vấn Gemini (tùy chọn)**: Chuyển đổi prompt ngôn ngữ tự nhiên thành **khía cạnh (EN prompts + trọng số)** và **seeds tiếng Việt** cho bước sắp xếp lại. Fallback sang dịch offline nếu không có API key.
-- **YouTube Player Overlay**: Nhảy đến vị trí khớp và hiển thị ánh xạ **thời gian → frame** trực tiếp bằng FPS từ metadata CSV.
+- **Tìm kiếm theo Video ID**: Tìm kiếm trực tiếp video cụ thể bằng ID.
+
+### 🎥 **Trình phát Video**
+- **YouTube Player**: Nhảy đến vị trí khớp và hiển thị ánh xạ **thời gian → frame** trực tiếp bằng FPS từ metadata CSV.
+- **Kaggle Offline Player**: Tải video từ Kaggle về máy local, sau đó stream qua Flask server với khả năng điều hướng frame chính xác (không giới hạn dung lượng).
+- **Dual-thumb Range Slider**: Chọn khoảng frame với phản hồi trực quan.
+- **Go to Frame**: Nhảy đến số frame cụ thể.
+- **Real-time Frame Display**: Hiển thị thời gian và frame hiện tại.
+
+### 📝 **Hệ thống Chú thích Video**
+- **KIS (Keyframe Identification System)**: Thu thập chú thích frame đơn
+- **QA (Question Answering)**: Thu thập chú thích frame với văn bản đáp án
+- **TRAKE (Tracking)**: Thu thập kết hợp frame đa scene với quản lý scene động
+- **Batch Annotation**: Thu thập nhiều frame cùng lúc với range selection
+- **Data Export**: Xuất chú thích dưới dạng CSV với định dạng chuẩn
 
 ---
 
 ## 📦 Cấu trúc thư mục & hợp đồng dữ liệu
 
-Đặt `DATA_ROOT` thành thư mục chứa hai batch `b1/` và `b2/` với cấu trúc sau (các trường tối thiểu được hiển thị):
+Đặt biến môi trường `DATA_ROOT` trỏ đến thư mục chứa hai batch `b1/` và `b2/` với cấu trúc sau (các trường tối thiểu được hiển thị):
 
 ```
-DATA_ROOT/
+PROJECT_ROOT/
+├─ app.py                        # Main application file
+├─ requirements.txt              # Python dependencies
+├─ README_vi.md                  # Vietnamese documentation
+├─ README.md                     # English documentation
+├─ .env                          # Environment configuration
+├─ .kaggle/                      # Kaggle API configuration
+│   └─ kaggle.json              # Kaggle API token
+└─ videos/                       # Downloaded videos storage
+   ├─ K01_V001.mp4
+   ├─ L21_V001.mp4
+   └─ ...
+
+DATA_ROOT/                       # Dataset directory (external, set via environment variable)
 ├─ b1/
 │  ├─ clip-features-32/         # npy mỗi video: (T, D) float32, CLIP features
 │  │   ├─ L21_V001.npy
@@ -80,29 +108,53 @@ Nếu `n` bị thiếu, ứng dụng ước tính frames từ thời gian và `f
 - **Hệ điều hành**: Windows 10/11, macOS, hoặc Linux
 - **GPU**: Không bắt buộc (ứng dụng chỉ mã hóa CLIP text; CPU là đủ)
 - **SQLite FTS5**: Bắt buộc cho BM25/FTS5; Python 3.10+ thường bao gồm FTS5. Nếu gặp lỗi FTS5, sử dụng phiên bản Python mới hơn.
-- **Dữ liệu**: Biến `DATA_ROOT` nên trỏ đến thư mục chứa `b1/` và `b2/` như mô tả bên dưới (tối thiểu: `clip-features-32/*.npy`, `map-keyframes/*.csv`, `text_bm25.db`).
+- **Dữ liệu**: Biến môi trường `DATA_ROOT` nên trỏ đến thư mục chứa `b1/` và `b2/` như mô tả bên dưới (tối thiểu: `clip-features-32/*.npy`, `map-keyframes/*.csv`, `text_bm25.db`). Dataset có thể đặt ở bất kỳ đâu, miễn là khai báo đúng trong biến môi trường.
 
 ## 🔧 Cài đặt
 
 > Khuyến nghị Python 3.10+. GPU là tùy chọn (chỉ mã hóa CLIP text).
 
+### Tạo Virtual Environment (Khuyến nghị)
 ```bash
-# Core
-pip install streamlit pandas numpy pillow deep-translator
+# Tạo virtual environment
+python -m venv .venv
 
-# CLIP text encoder (hoặc open-clip hoặc CLIP gốc)
-pip install open-clip-torch          # ưu tiên
-# Tùy chọn thay thế:
-# pip install git+https://github.com/openai/CLIP.git
+# Kích hoạt virtual environment
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
 
-# Gemini (SDK chính thức mới được sử dụng trong toàn bộ ứng dụng)
+# Kiểm tra đã kích hoạt thành công (sẽ thấy (.venv) ở đầu dòng)
+```
+
+### Cài đặt từ requirements.txt
+```bash
+pip install -r requirements.txt
+```
+
+### Cài đặt thủ công
+```bash
+# Core dependencies
+pip install streamlit>=1.28.0 pandas>=1.3.0 numpy>=1.21.0 pillow>=8.0.0 deep-translator>=1.9.0
+
+# CLIP text encoder
+pip install open-clip-torch>=2.20.0
+
+# Google Gemini API (SDK mới)
 pip install google-genai>=0.8.0
 
-# Parquet (tùy chọn nhưng khuyến nghị cho metadata nhanh)
+# Additional utilities
+pip install requests>=2.25.0 tqdm>=4.60.0 stopwordsiso>=0.1.0
+
+# Kaggle Hub (for offline video player)
+pip install kagglehub
+
+# Optional: Parquet support for faster metadata loading
 pip install pyarrow fastparquet
 ```
 
-> Ứng dụng hiện chỉ sử dụng SDK **mới** `google-genai` (`google.genai.Client`).
+> **Lưu ý**: Ứng dụng sử dụng SDK **mới** `google-genai` (`google.genai.Client`) thay vì `google-generativeai`.
 
 ---
 
@@ -117,12 +169,75 @@ GOOGLE_API_KEY=your_gemini_key_here
 
 Tất cả env vars cũng có thể được export bình thường.
 
+### 🔑 **Kaggle API Setup**
+
+Để sử dụng tính năng "Kaggle Offline" video player:
+
+1. **Lấy Kaggle API Token**:
+   - Đăng nhập vào [Kaggle](https://www.kaggle.com/)
+   - Vào Account → API → Create New API Token
+   - Tải file `kaggle.json` về máy
+
+2. **Cấu hình Kaggle API**:
+   ```bash
+   # Tạo thư mục .kaggle trong cùng thư mục code
+   mkdir .kaggle
+   
+   # Copy file kaggle.json vào thư mục .kaggle
+   copy kaggle.json .kaggle\        # Windows
+   cp kaggle.json .kaggle/         # Linux/macOS
+   
+   # Đặt quyền phù hợp (Linux/macOS)
+   chmod 600 .kaggle/kaggle.json
+   ```
+
+3. **Cài đặt Kaggle Hub**:
+   ```bash
+   pip install kagglehub
+   ```
+
+4. **Test kết nối**:
+   ```python
+   import kagglehub
+   # Test download một dataset nhỏ để kiểm tra API
+   ```
+
+### 📁 **Video Storage Management**
+
+**Vị trí lưu video**:
+- Video được tải về: `./videos/` (trong thư mục dự án)
+- Format tên file: `{video_id}.mp4` (ví dụ: `K01_V001.mp4`)
+
+**Tự động dọn dẹp**:
+```bash
+# Xóa tất cả video đã tải
+rm -rf ./videos/*
+
+# Xóa video cũ hơn 7 ngày (Linux/macOS)
+find ./videos -name "*.mp4" -mtime +7 -delete
+
+# Xóa video cũ hơn 7 ngày (Windows PowerShell)
+Get-ChildItem ./videos -Filter "*.mp4" | Where-Object {$_.LastWriteTime -lt (Get-Date).AddDays(-7)} | Remove-Item
+```
+
+**Cấu hình dung lượng**:
+- Video được tải từ Kaggle về máy local trước, sau đó stream qua Flask server
+- Thư mục `videos/` có thể phát triển lớn theo thời gian
+- Khuyến nghị: Dọn dẹp định kỳ hoặc tăng dung lượng ổ cứng
+
 ---
 
 ## ▶️ Chạy
 
-Lưu mã của bạn dưới dạng `app.py` (hoặc bất kỳ tên nào) và chạy:
+### Kích hoạt Virtual Environment (nếu sử dụng)
+```bash
+# Windows:
+.venv\Scripts\activate
+# Linux/macOS:
+source .venv/bin/activate
+```
 
+### Chạy ứng dụng
 ```bash
 streamlit run app.py --server.port 8501 --browser.gatherUsageStats false
 ```
@@ -154,7 +269,9 @@ Mở URL local được in trong trình duyệt.
 - **Chế độ tìm kiếm**
   - `CLIP Multi‑aspects Search` (không sắp xếp lại)
   - `CLIP Multi‑aspects Search + Rerank` (cần Gemini để xây dựng seeds tiếng Việt)
+  - `Transcript Seed Search (BM25)` (tìm kiếm với seeds từ Gemini)
   - `BM25 Keyword Search` (tìm kiếm text độc lập)
+  - `Search by Video ID` (tìm kiếm video cụ thể)
 
 - **Hộp truy vấn**
   - Ngôn ngữ tự nhiên (VI/EN) cho chế độ CLIP
@@ -225,10 +342,10 @@ Phím tắt được ứng dụng nhận dạng:
   - `hits_any = COUNT(q_any)`
   - `hits_phr = COUNT(q_phr)`
 - Chuẩn hóa bằng min-max → `clip_n`, `any_n`, `phr_n`
-- `text_score = 0.5*any_n + 0.5*phr_n` (có thể điều chỉnh)  
-- **Điểm kết hợp**: `fused = 0.6*clip_n + 0.4*text_score` (có thể điều chỉnh)
+- `text_score = 0.3*any_n + 0.7*phr_n` (có thể điều chỉnh)  
+- **Điểm kết hợp**: `fused = 0.4*clip_n + 0.6*text_score` (có thể điều chỉnh)
 
-> Các nút điều chỉnh được expose trong mã: `w_clip`, `w_text`, `text_weights = {"any": a, "phr": b}`, `Δ=DELTA_SEC`.
+> Các nút điều chỉnh được expose trong mã: `w_clip=0.4`, `w_text=0.6`, `text_weights = {"any": 0.3, "phr": 0.7}`, `Δ=DELTA_SEC`.
 
 ---
 
@@ -250,58 +367,59 @@ Nếu JSON tồn tại tại `media-info/{video_id}.json` với `{ "watch_url": 
 - Hiển thị **thời gian hiện tại** và **frame** được tính qua `FPS` đọc từ `map-keyframes/{video_id}.csv`.
 - Cho phép tìm kiếm theo **số frame**.
 
+## 🎬 Kaggle Offline Player với Flask Streaming
+
+Ứng dụng sử dụng Flask server để stream video từ local storage:
+- **Download Process**: Video được tải từ Kaggle về `./videos/` trước
+- **Flask Streaming**: Server Flask chạy trên port 8801 để stream video
+- **No Size Limit**: Không bị giới hạn 200MB của Kaggle API
+- **Frame Navigation**: Điều hướng frame chính xác với FPS từ metadata
+- **Auto-start**: Video bắt đầu tại timestamp được chỉ định
+
 ---
 
 ## 🎯 Tính năng chú thích video
 
-Ứng dụng hiện bao gồm khả năng chú thích video toàn diện cho các tác vụ thu thập và gắn nhãn dữ liệu:
+Ứng dụng bao gồm hệ thống chú thích video toàn diện với giao diện tương tác cao:
 
-### 📝 Các loại tác vụ
+### 📝 **Các loại tác vụ**
 
-- **KIS (Hệ thống nhận dạng Keyframe)**: Thu thập chú thích frame đơn
-- **QA (Trả lời câu hỏi)**: Thu thập chú thích frame với văn bản đáp án
-- **TRAKE (Theo dõi)**: Thu thập kết hợp frame đa scene
+- **KIS (Keyframe Identification System)**: Thu thập chú thích frame đơn
+- **QA (Question Answering)**: Thu thập chú thích frame với văn bản đáp án
+- **TRAKE (Tracking)**: Thu thập kết hợp frame đa scene với quản lý scene động
 
-### 🎮 Trình phát video tương tác
+### 🎮 **Trình phát video tương tác**
 
-- **Thanh trượt Range Dual-thumb**: Chọn khoảng frame với phản hồi trực quan
-- **Thanh trượt Frame**: Điều hướng qua các frame video
-- **Go to Frame**: Nhảy đến số frame cụ thể
-- **Hiển thị thời gian**: Hiển thị thời gian hiện tại ở định dạng `mm:ss:ff`
-- **Tự động bắt đầu**: Video bắt đầu tại timestamp được chỉ định
+- **Dual-thumb Range Slider**: Chọn khoảng frame với phản hồi trực quan
+- **Frame Navigation**: Điều hướng qua các frame video với thanh trượt
+- **Go to Frame**: Nhảy đến số frame cụ thể bằng input
+- **Real-time Display**: Hiển thị thời gian và frame hiện tại
+- **Auto-start**: Video bắt đầu tại timestamp được chỉ định
 
-### 📊 Giao diện thu thập dữ liệu
+### 📊 **Giao diện thu thập dữ liệu**
 
-- **Nhập số câu hỏi**: Chỉ định số lượng câu hỏi để chú thích
-- **Lựa chọn tác vụ**: Chọn giữa các tác vụ KIS, QA, hoặc TRAKE
-- **Nhập đáp án**: Cho tác vụ QA, nhập văn bản đáp án
-- **Quản lý Scene**: Cho tác vụ TRAKE, quản lý nhiều scene với input động
+- **Task Configuration**: Chọn loại tác vụ và số câu hỏi
+- **QA Answer Input**: Nhập đáp án cho tác vụ QA
+- **Scene Management**: Quản lý nhiều scene cho tác vụ TRAKE
+- **Batch Collection**: Thu thập nhiều frame cùng lúc
 
-### 🎨 Tính năng UI nâng cao
+### 🎨 **Tính năng UI nâng cao**
 
-- **Nút Scene**: Lựa chọn scene trực quan với trạng thái mã màu (đỏ=trống, xanh=đã điền)
-- **Tự động tiến**: Tự động chuyển sang scene tiếp theo sau khi thêm dữ liệu
-- **Nút Current**: Đặt ranh giới range thành frame hiện tại
-- **Điều khiển Step**: Tăng/giảm giá trị range
-- **Xác thực thời gian thực**: Xác thực input với thông báo lỗi
+- **Visual Scene Selection**: Nút scene với trạng thái mã màu (đỏ=trống, xanh=đã điền)
+- **Auto-advance**: Tự động chuyển sang scene tiếp theo
+- **Current Frame Button**: Đặt ranh giới range thành frame hiện tại
+- **Step Controls**: Tăng/giảm giá trị range với nút ▲/▼
+- **Real-time Validation**: Xác thực input với thông báo lỗi
 
-### 💾 Quản lý dữ liệu
+### 💾 **Quản lý dữ liệu**
 
-- **Preview Result**: Xem trước trực tiếp dữ liệu đã thu thập (giới hạn: 100 entries)
-- **Delete Range**: Xóa entries bằng cách chỉ định khoảng hàng
-- **Xuất CSV**: Lưu chú thích với định dạng `query-<số_câu>-<task>.csv`
-- **Xử lý lỗi**: Xác thực toàn diện và thông báo lỗi
-- **Phản hồi thành công**: Thông báo xác nhận cho tất cả hoạt động
+- **Live Preview**: Xem trước trực tiếp dữ liệu đã thu thập (giới hạn: 100 entries)
+- **Range Deletion**: Xóa entries bằng cách chỉ định khoảng hàng
+- **CSV Export**: Lưu chú thích với định dạng `query-<số_câu>-<task>.csv`
+- **Error Handling**: Xác thực toàn diện và thông báo lỗi
+- **Success Notifications**: Thông báo xác nhận cho tất cả hoạt động
 
-### 🔧 Tính năng kỹ thuật
-
-- **Định dạng khoảng cách**: Định dạng CSV đúng với khoảng cách sau dấu phẩy
-- **Xác thực tác vụ**: Đảm bảo số câu hỏi và lựa chọn tác vụ trước khi lưu
-- **Xác thực file**: Ngăn chặn lưu file trống hoặc không hợp lệ
-- **Hệ thống thông báo**: Thông báo fade-in/fade-out cho phản hồi người dùng
-- **Layout phản hồi**: Tối ưu cho các kích thước màn hình khác nhau
-
-### 📋 Quy trình sử dụng
+### 📋 **Quy trình sử dụng**
 
 1. **Thiết lập**: Nhập số câu hỏi và chọn loại tác vụ
 2. **Điều hướng**: Sử dụng thanh trượt và điều khiển để tìm frame mong muốn
@@ -313,25 +431,117 @@ Nếu JSON tồn tại tại `media-info/{video_id}.json` với `{ "watch_url": 
 
 ## 🛠️ Khắc phục sự cố
 
+### **Dữ liệu và Cấu hình**
 - **Không có kết quả / thiếu dữ liệu**  
   - Kiểm tra `DATA_ROOT` và đảm bảo tất cả thư mục cần thiết tồn tại.  
   - Xác minh `clip-features-32/{video_id}.npy` và `map-keyframes/{video_id}.csv` có mặt.
+  - Kiểm tra quyền truy cập file và đường dẫn có chứa ký tự đặc biệt.
+- **Virtual Environment Issues**
+  - Đảm bảo đã kích hoạt virtual environment: `source .venv/bin/activate` (Linux/macOS) hoặc `.venv\Scripts\activate` (Windows)
+  - Kiểm tra Python path: `which python` (Linux/macOS) hoặc `where python` (Windows)
+  - Nếu gặp lỗi import, thử cài đặt lại: `pip install -r requirements.txt`
+
+### **Tìm kiếm BM25**
 - **Lỗi BM25**  
   - Xác nhận `text_bm25.db` tồn tại cho batch đã chọn và `docs` là **FTS5**.  
   - Đảm bảo cột `text` ở chỉ số `2` cho `snippet(docs, 2, ...)` hoặc điều chỉnh chỉ số cột.
+  - Kiểm tra SQLite version hỗ trợ FTS5: `sqlite3 --version`
+  - Test query đơn giản: `"công an"` hoặc `cát AND điêu`
+
+### **Gemini API**
 - **Lỗi Gemini**  
-  - Cung cấp `GOOGLE_API_KEY`.  
-  - Cài đặt cả `google-genai` và `google-generativeai`, hoặc thống nhất imports trong mã.
+  - Cung cấp `GOOGLE_API_KEY` hợp lệ từ https://aistudio.google.com
+  - Sử dụng SDK mới: `google-genai>=0.8.0` (không phải `google-generativeai`)
+  - Test API connection bằng nút "Test Gemini API" trong ứng dụng
+  - Kiểm tra quota và rate limits của API
+
+### **Video và Hình ảnh**
 - **Không tìm thấy hình ảnh**  
-  - Ứng dụng thử fallbacks (±N frames, danh sách chuẩn, hoặc quét thư mục). Kiểm tra độ rộng zero-padding mỗi batch (B1 sử dụng 3–4, B2 thường 4).
+  - Ứng dụng thử fallbacks (±N frames, danh sách chuẩn, hoặc quét thư mục)
+  - Kiểm tra độ rộng zero-padding mỗi batch (B1 sử dụng 3–4, B2 thường 4) [[memory:8547778]]
+  - Xác minh `keyframes/{video_id}/` có chứa file hình ảnh
+- **Video không phát được**
+  - YouTube: Kiểm tra URL hợp lệ và video không bị hạn chế
+  - Kaggle Offline: Đảm bảo có quyền truy cập Kaggle dataset
+  - Local server: Kiểm tra port 8801 không bị chiếm dụng
+  - Flask streaming: Kiểm tra Flask server đang chạy trên port 8801
+- **Kaggle API Issues**
+  - Kiểm tra file `kaggle.json` trong `./.kaggle/` (trong thư mục dự án)
+  - Test API bằng Python: `import kagglehub`
+  - Đảm bảo đã accept dataset terms trên Kaggle website
+  - Kiểm tra quota và rate limits của Kaggle API
+  - Kiểm tra kết nối internet và firewall settings
+- **Video Storage Issues**
+  - Kiểm tra dung lượng ổ cứng còn trống
+  - Xóa video cũ: `rm -rf ./videos/*` (Linux/macOS) hoặc `Remove-Item ./videos/*` (Windows)
+  - Kiểm tra quyền ghi vào thư mục `./videos/`
+
+### **Chú thích Video**
+- **Lỗi chú thích**
+  - Đảm bảo nhập số câu hỏi hợp lệ (> 0)
+  - Cho tác vụ QA: nhập đáp án trước khi thêm frame
+  - Cho tác vụ TRAKE: nhập số scene và frame cho mỗi scene
+  - Kiểm tra giới hạn 100 entries trong preview
+
+### **Performance**
+- **Ứng dụng chạy chậm**
+  - Giảm `Top K` để hiển thị ít video hơn
+  - Tăng `Skip Intro` để bỏ qua phần đầu video
+  - Sử dụng GPU nếu có cho CLIP encoding
+  - Kiểm tra RAM và CPU usage
 
 ---
 
 ## 🧪 Kiểm tra khói tối thiểu
 
-1) Chạy với **BM25 Keyword Search** và truy vấn `"công an"` để xác thực FTS.  
-2) Chuyển sang **CLIP Multi‑aspects Search**; nhập mô tả VI ngắn (không Gemini).  
-3) Nhập API key và click **Enhance Query** để xác minh Gemini và sắp xếp lại.
+### **Test cơ bản**
+1) **BM25 Keyword Search**: Truy vấn `"công an"` để xác thực FTS5
+2) **CLIP Multi-aspects Search**: Nhập mô tả VI ngắn (không cần Gemini)
+3) **Video ID Search**: Tìm `K01_V001` hoặc `L21_V001`
+
+### **Test nâng cao**
+4) **Gemini Integration**: Nhập API key và test "Enhance Query"
+5) **Rerank**: Chạy "CLIP Multi-aspects Search + Rerank"
+6) **Video Annotation**: Test chú thích với tác vụ KIS/QA/TRAKE
+
+### **Test Video Player**
+7) **YouTube Player**: Click "Watch Video" → "Youtube Online"
+8) **Kaggle Offline**: Click "Watch Video" → "Kaggle Offline"
+
+---
+
+## 📚 Ví dụ sử dụng
+
+### **Tìm kiếm cơ bản**
+```bash
+# BM25 queries
+"công an"                    # Exact phrase
+cát AND điêu AND khắc        # All words required
+cát OR "điêu khắc"           # Either word or phrase
+cát NOT biển                 # "cát" without "biển"
+
+# CLIP queries (Vietnamese/English)
+"video về điêu khắc cát"
+"video showing sand sculpture"
+"bài học về nghệ thuật"
+```
+
+### **Cấu hình nâng cao**
+```bash
+# Environment variables
+DATA_ROOT=/path/to/HCMC-AI/
+GOOGLE_API_KEY=your_gemini_key_here
+
+# Streamlit options
+streamlit run app.py --server.port 8501 --browser.gatherUsageStats false
+```
+
+### **Annotation Workflow**
+1. **Setup**: Chọn tác vụ (KIS/QA/TRAKE), nhập số câu hỏi
+2. **Navigate**: Sử dụng frame slider để tìm vị trí mong muốn
+3. **Collect**: Add single frame hoặc Add Batch range
+4. **Review**: Xem Preview Result, xóa nếu cần
+5. **Export**: Save CSV với format chuẩn
 
 ---
 
