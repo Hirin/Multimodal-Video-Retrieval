@@ -2629,43 +2629,56 @@ if not st.session_state.get("_local_video_server_started"):
 # =============================== STREAMLIT UI ============================================
 st.set_page_config(page_title="Video Retrieval - CLIP + BM25 Search", layout="wide")
 
-# Pre-load CLIP model for faster search
-with st.spinner("🔄 Loading CLIP model..."):
-    try:
-        ensure_clip_text_encoder()
-        st.success("✅ CLIP model loaded successfully!")
-    except Exception as e:
-        st.error(f"❌ Failed to load CLIP model: {e}")
-        st.warning("⚠️ CLIP search will be slower on first use")
+# Pre-load CLIP model for faster search (only on first app load)
+if 'clip_model_preloaded' not in st.session_state:
+    with st.spinner("🔄 Loading CLIP model..."):
+        try:
+            ensure_clip_text_encoder()
+            st.success("✅ CLIP model loaded successfully!")
+            st.session_state.clip_model_preloaded = True
+        except Exception as e:
+            st.error(f"❌ Failed to load CLIP model: {e}")
+            st.warning("⚠️ CLIP search will be slower on first use")
+            st.session_state.clip_model_preloaded = True  # Set to True even on error to prevent retry
 
-# Row 1: Title
-st.title("Video Retrieval - CLIP + BM25 Search")
-st.markdown("*Choose your search mode: **CLIP visual search** or **BM25 text search***")
+# ============================ SIDEBAR START =======================================
+with st.sidebar:
+    st.title("Configuration")
 
-# Row 2: Filter options (collapsible)
-with st.expander("🔧 Search Filters", expanded=False):
-    # Dataset selection
-    col1, col2 = st.columns([1, 2])
+    # Search Mode Selection
+    MODES = [
+        "CLIP Multi-aspects Search",
+        "CLIP Multi-aspects Search + Rerank",
+        "Transcript Seed Search (BM25)",
+        "BM25 Keyword Search",
+        "Search by Video ID",
+    ]
+    search_mode = st.selectbox("🔎 Search Mode", MODES, index=0, key="search_mode_sel")
+    
+    # Gemini availability toggle (placed below Max aspects and above query input)
+    gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
+    turn_off_gemini = st.checkbox(
+        "🔌 Turn off Gemini",
+        value=False,
+        key="turn_off_gemini",
+        help="Disable Gemini API to skip Enhance step. Rerank requires Gemini and will be disabled."
+    )
+    gemini_available = gemini_configured and not turn_off_gemini
 
-    with col1:
+    # Row 2: Filter options (collapsible)
+    with st.expander("🔧 Search Filters", expanded=True):
+        # Dataset selection
         st.markdown("**Dataset Selection:**")
-        batch_label = st.selectbox("Choose Dataset:", ["Both Batches", "Batch 1", "Batch 2"], index=0)
+        batch_label = st.selectbox("Choose Dataset:", ["Both Batches", "Batch 1", "Batch 2"], index=0, label_visibility="collapsed")
 
-    with col2:
         st.markdown("**Advanced Filters:**")
-
-    # Filter inputs
-    filter_col1, filter_col2 = st.columns(2)
-
-    with filter_col1:
+        # Filter inputs
         exclude_series = st.text_input(
             "❌ Exclude Series:",
             placeholder="L01,L02,K01",
             help="Exclude video series (comma-separated). E.g., L01,L02 to exclude batch 1 videos",
             key="exclude_series"
         )
-
-    with filter_col2:
         exclude_videos = st.text_input(
             "❌ Exclude Videos:",
             placeholder="L01V001,L01V002",
@@ -2678,12 +2691,12 @@ with st.expander("🔧 Search Filters", expanded=False):
     exclude_videos_list = [v.strip() for v in exclude_videos.split(',') if v.strip()]
 
     # Apply dataset selection
-if batch_label == "Batch 1":
-    DATASETS = {"b1"}
-elif batch_label == "Batch 2":
-    DATASETS = {"b2"}
-else:
-    DATASETS = {"b1", "b2"}
+    if batch_label == "Batch 1":
+        DATASETS = {"b1"}
+    elif batch_label == "Batch 2":
+        DATASETS = {"b2"}
+    else:
+        DATASETS = {"b1", "b2"}
 
     # Show active filters summary
     active_filters = []
@@ -2695,316 +2708,123 @@ else:
         active_filters.append(f"Exclude {len(exclude_videos_list)} videos")
 
     if active_filters:
-        st.success(f"✅ **Active Filters:** {', '.join(active_filters)}")
+        st.success(f"**Active Filters:** {', '.join(active_filters)}")
     else:
-        st.info("ℹ️ **No filters applied** - searching all available videos")
+        st.info("**No filters applied**")
+    # Gemini API Configuration and Testing
+    with st.expander("🔑 Gemini API Configuration", expanded=False):
+        st.markdown("**Configure and test your Gemini API connection**")
+        
+        # API Key input
+        api_key = st.text_input(
+            "Gemini API Key:",
+            value=GOOGLE_API_KEY,
+            type="password",
+            help="Enter your Google Gemini API key."
+        )
 
-# Row 2.5: Gemini API Configuration and Testing
-with st.expander("🔑 Gemini API Configuration", expanded=False):
-    st.markdown("**Configure and test your Gemini API connection**")
-    
-    col1, col2 = st.columns([3, 1])
-    
-    # API Key input
-    api_key = st.text_input(
-        "Gemini API Key:",
-        value=GOOGLE_API_KEY,
-        type="password",
-        help="Enter your Google Gemini API key. You can get one from https://aistudio.google.com"
-    )
+        # Update the global API key if changed
+        if api_key and api_key != GOOGLE_API_KEY:
+            GOOGLE_API_KEY = api_key
+            os.environ["GOOGLE_API_KEY"] = api_key
 
-    # Update the global API key if changed
-    if api_key and api_key != GOOGLE_API_KEY:
-        GOOGLE_API_KEY = api_key
-        os.environ["GOOGLE_API_KEY"] = api_key
-
-    # Gemini Configuration Options (only show if API key is configured)
-    if api_key and api_key.strip():
-        st.markdown("**Model Selection:**")
-        col_model = st.columns([1])[0]
-
-        with col_model:
+        # Gemini Configuration Options
+        if api_key and api_key.strip():
+            st.markdown("**Model Selection & Parameters:**")
             gemini_model = st.selectbox(
-                "Gemini Model:",
+                "Model",
                 ["gemini-2.5-flash", "gemini-2.5-pro"],
                 index=0,
-                help="gemini-2.5-pro: High quality, gemini-2.5-flash: Fast speed but sometime get bad result"
+                help="Pro: High quality, Flash: Fast speed."
             )
+            col_temp, col_topp = st.columns(2)
+            gemini_temperature = col_temp.slider("Temperature", 0.0, 2.0, 0.7, 0.1)
+            gemini_top_p = col_topp.slider("Top P", 0.0, 1.0, 0.9, 0.05)
 
-        st.markdown("**Generation Parameters:**")
-        col_temp, col_topp = st.columns(2)
-
-        with col_temp:
-            gemini_temperature = st.slider(
-                "Temperature",
-                min_value=0.0,
-                max_value=2.0,
-                value=0.7,
-                step=0.1,
-                help="Controls randomness. Lower = more focused, Higher = more creative"
-            )
-
-        with col_topp:
-            gemini_top_p = st.slider(
-                "Top P",
-                min_value=0.0,
-                max_value=1.0,
-                value=0.9,
-                step=0.05,
-                help="Controls diversity. Lower = more focused, Higher = more diverse"
-            )
-
-    test_button = st.button("🧪 Test Gemini API", type="primary")
-    
-    # Test API connection (using google-genai Client)
-    if test_button:
-        if not api_key:
-            st.error("❌ Please enter your Gemini API key first!")
+        test_button = st.button("🧪 Test Gemini API", type="primary")
+        
+        if test_button:
+            # (The existing test logic remains unchanged)
+            if not api_key:
+                st.error("❌ Please enter your Gemini API key first!")
+            else:
+                with st.spinner("Testing Gemini API connection..."):
+                    try:
+                        from google import genai
+                        client = genai.Client(api_key=api_key)
+                        resp = client.models.generate_content(model='gemini-2.0-flash', contents="Hello! Please respond with 'API connection successful' if you can read this message.")
+                        response_text = (getattr(resp, "text", None) or getattr(resp, "output_text", None) or "").strip()
+                        if response_text:
+                            st.success("✅ **Test Successful!**")
+                            st.info(f"**Response:** {response_text}")
+                        else:
+                            st.warning("⚠️ **API responded but with empty content**")
+                    except Exception as e:
+                        st.error("❌ **Test Failed!**")
+                        st.error(f"**Error:** {str(e)}")
+        
+        if GOOGLE_API_KEY:
+            st.success("🔑 **API Key Status:** Configured")
         else:
-            with st.spinner("Testing Gemini API connection..."):
-                try:
-                    # Test with a simple prompt
-                    test_prompt = "Hello! Please respond with 'API connection successful' if you can read this message."
+            st.warning("⚠️ **API Key Status:** Not configured")
 
-                    # Use the new google-genai SDK consistently
-                    from google import genai
-                    client = genai.Client(api_key=api_key)
-                    resp = client.models.generate_content(
-                        model='gemini-2.0-flash',
-                        contents=test_prompt
-                    )
-                    response_text = (getattr(resp, "text", None) or getattr(resp, "output_text", None) or "").strip()
+    # General Settings
+    with st.expander("⚙️ General Settings", expanded=False):
+        st.markdown("**Time & Ranking**")
+        # (The logic for Time & Ranking settings remains the same)
+        _pending = st.session_state.pop('pending_setting_inputs', None)
+        if _pending:
+            for _k in ['win_str_inp', 'skip_str_inp', 'del_str_inp', 'topk_inp']:
+                st.session_state.pop(_k, None)
+        _win_default = sec_to_mmss(float(st.session_state.get('WINDOW_SEC', WINDOW_SEC)))
+        _skip_default = sec_to_mmss(float(st.session_state.get('SKIP_SEC', SKIP_SEC)))
+        _del_default = sec_to_mmss(float(st.session_state.get('DELTA_SEC', DELTA_SEC)))
+        _top_default = int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS))
 
-                    if response_text:
-                        st.success("✅ **Gemini API Test Successful!**")
-                        st.info(f"**Response:** {response_text}")
-                        st.markdown("🎉 Your Gemini API is working correctly and ready to use!")
-                    else:
-                        st.warning("⚠️ **API responded but with empty content**")
-                        st.markdown("The API connection works but returned no content.")
-
-                except Exception as e:
-                    st.error("❌ **Gemini API Test Failed!**")
-                    st.error(f"**Error:** {str(e)}")
-                    st.markdown("**Common issues:**")
-                    st.markdown("- Invalid API key")
-                    st.markdown("- API quota exceeded")
-                    st.markdown("- Network connectivity issues")
-                    st.markdown("- API service temporarily unavailable")
-    
-    # Show current status
-    if GOOGLE_API_KEY:
-        st.success("🔑 **API Key Status:** Configured")
-    else:
-        st.warning("⚠️ **API Key Status:** Not configured")
-
-# Row 3: Setting
-with st.expander("⚙️ Setting", expanded=False):
-    st.markdown("**Time Settings**")
-    # Apply pending inputs BEFORE widgets are created
-    _pending = st.session_state.pop('pending_setting_inputs', None)
-    if _pending:
-        # Clear previous widget states so value= is used
-        for _k in ['win_str_inp', 'skip_str_inp', 'del_str_inp', 'topk_inp']:
-            try:
-                st.session_state.pop(_k)
-            except Exception:
-                pass
-    _win_default = (_pending.get('win') if _pending else sec_to_mmss(float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))))
-    _skip_default = (_pending.get('skip') if _pending else sec_to_mmss(float(st.session_state.get('SKIP_SEC', SKIP_SEC))))
-    _del_default = (_pending.get('del') if _pending else sec_to_mmss(float(st.session_state.get('DELTA_SEC', DELTA_SEC))))
-    _top_default = (_pending.get('top') if _pending else int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS)))
-
-    col_win, col_skip, col_del, col_top = st.columns([1, 1, 1, 1])
-    with col_win:
-        win_str_inp = st.text_input(
-            "Window Second (mm:ss)",
-            value=st.session_state.get('win_str_inp', _win_default),
-            key="win_str_inp",
-            help="Độ dài cửa sổ trượt khi tính CLIP window score"
+        win_str_inp = st.text_input("Window", value=_win_default, key="win_str_inp")
+        skip_str_inp = st.text_input("Skip Intro", value=_skip_default, key="skip_str_inp")
+        
+        del_str_inp = st.text_input("Rerank Window", value=_del_default, key="del_str_inp")
+        topk_inp = st.number_input("Top K", 1, 200, value=_top_default, step=1, key="topk_inp")
+        
+        pending_change = (
+            sec_to_mmss(float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))) != win_str_inp or
+            sec_to_mmss(float(st.session_state.get('SKIP_SEC', SKIP_SEC))) != skip_str_inp or
+            sec_to_mmss(float(st.session_state.get('DELTA_SEC', DELTA_SEC))) != del_str_inp or
+            int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS)) != int(topk_inp)
         )
-    with col_skip:
-        skip_str_inp = st.text_input(
-            "Skip Intro (mm:ss)",
-            value=st.session_state.get('skip_str_inp', _skip_default),
-            key="skip_str_inp",
-            help="Skip phần intro của video"
-        )
-    with col_del:
-        del_str_inp = st.text_input(
-            "Rerank Window (mm:ss)",
-            value=st.session_state.get('del_str_inp', _del_default),
-            key="del_str_inp",
-            help="Mở rộng cửa sổ t0/t1 khi rerank transcript"
-        )
-    with col_top:
-        topk_inp = st.number_input(
-            "Top K",
-            min_value=1,
-            max_value=200,
-            value=int(st.session_state.get('topk_inp', _top_default)),
-            step=1,
-            key="topk_inp",
-            help="Số video hiển thị tối đa"
-        )
-    # Show Update button only when any value differs
-    pending_change = (
-        sec_to_mmss(float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))) != win_str_inp or
-        sec_to_mmss(float(st.session_state.get('SKIP_SEC', SKIP_SEC))) != skip_str_inp or
-        sec_to_mmss(float(st.session_state.get('DELTA_SEC', DELTA_SEC))) != del_str_inp or
-        int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS)) != int(topk_inp)
-    )
-    col_sp, col_btn_upd, col_btn_reset, col_btn_def = st.columns([5, 1, 1, 1])
-    with col_btn_upd:
-        update_cfg = st.button("Update Setting", type="secondary") if pending_change else None
-    with col_btn_reset:
-        reset_cfg = st.button("Reset Setting", type="secondary") if pending_change else None
-    with col_btn_def:
-        default_cfg = st.button("Default Setting", type="secondary")
+        
+        col_upd, col_reset = st.columns(2)
+        if pending_change:
+            update_cfg = col_upd.button("Update", type="secondary", use_container_width=True)
+            reset_cfg = col_reset.button("Reset", use_container_width=True)
+        else:
+            col_upd.empty()
+            col_reset.empty()
+        default_cfg = st.button("Default", use_container_width=True)
 
-    if update_cfg:
-        st.session_state['WINDOW_SEC'] = parse_mmss(win_str_inp, WINDOW_SEC)
-        st.session_state['SKIP_SEC'] = parse_mmss(skip_str_inp, SKIP_SEC)
-        st.session_state['DELTA_SEC'] = parse_mmss(del_str_inp, DELTA_SEC)
-        st.session_state['TOP_VIDEOS'] = int(topk_inp)
-        st.rerun()
-    if 'reset_cfg' in locals() and reset_cfg:
-        # Set pending inputs to current applied settings and rerun
-        _w = float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))
-        _s = float(st.session_state.get('SKIP_SEC', SKIP_SEC))
-        _d = float(st.session_state.get('DELTA_SEC', DELTA_SEC))
-        _t = int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS))
-        st.session_state['pending_setting_inputs'] = {
-            'win': sec_to_mmss(_w),
-            'skip': sec_to_mmss(_s),
-            'del': sec_to_mmss(_d),
-            'top': _t,
-        }
-        st.rerun()
-    if 'default_cfg' in locals() and default_cfg:
-        # Restore defaults
-        st.session_state['WINDOW_SEC'] = 40.0
-        st.session_state['SKIP_SEC'] = 0.0
-        st.session_state['DELTA_SEC'] = 20.0
-        st.session_state['TOP_VIDEOS'] = 20
-        st.session_state['pending_setting_inputs'] = {
-            'win': sec_to_mmss(40.0),
-            'skip': sec_to_mmss(0.0),
-            'del': sec_to_mmss(20.0),
-            'top': 20,
-        }
-        st.rerun()
+        if 'update_cfg' in locals() and update_cfg:
+            st.session_state['WINDOW_SEC'] = parse_mmss(win_str_inp, WINDOW_SEC)
+            st.session_state['SKIP_SEC'] = parse_mmss(skip_str_inp, SKIP_SEC)
+            st.session_state['DELTA_SEC'] = parse_mmss(del_str_inp, DELTA_SEC)
+            st.session_state['TOP_VIDEOS'] = int(topk_inp)
+            st.rerun()
+        if 'reset_cfg' in locals() and reset_cfg:
+            st.session_state['pending_setting_inputs'] = {'win': sec_to_mmss(st.session_state.get('WINDOW_SEC')), 'skip': sec_to_mmss(st.session_state.get('SKIP_SEC')), 'del': sec_to_mmss(st.session_state.get('DELTA_SEC')), 'top': int(st.session_state.get('TOP_VIDEOS'))}
+            st.rerun()
+        if 'default_cfg' in locals() and default_cfg:
+            st.session_state.update({'WINDOW_SEC': 40.0, 'SKIP_SEC': 0.0, 'DELTA_SEC': 20.0, 'TOP_VIDEOS': 20})
+            st.session_state['pending_setting_inputs'] = {'win': '00:40', 'skip': '00:00', 'del': '00:20', 'top': 20}
+            st.rerun()
 
-    # Fused Formula Weight Settings
-    st.markdown("**Fused Formula Weights**")
-    st.markdown("**Công thức:**")
-    st.latex(r"fused = w_{clip} \cdot \frac{clip_{total}}{num_{aspects}} + w_{text} \cdot (w_{any} \cdot hits_{any} + w_{phr} \cdot hits_{phr})")
-    
-    col_w_clip, col_w_text = st.columns([1, 1])
-    with col_w_clip:
-        w_clip_slider = st.slider(
-            "w_clip (CLIP Weight)",
-            min_value=0.0,
-            max_value=1.0,
-            value=float(st.session_state.get('W_CLIP', 0.4)),
-            step=0.05,
-            key="w_clip_slider",
-            help="Trọng số cho CLIP score trong công thức fused"
-        )
-    with col_w_text:
-        w_text_slider = st.slider(
-            "w_text (Text Weight)",
-            min_value=0.0,
-            max_value=1.0,
-            value=float(st.session_state.get('W_TEXT', 0.6)),
-            step=0.05,
-            key="w_text_slider",
-            help="Trọng số cho Text score trong công thức fused"
-        )
-    
-    # Text weights (any/phr)
-    st.markdown("**Text Component Weights**")
-    col_w_any, col_w_phr = st.columns([1, 1])
-    with col_w_any:
-        w_any_slider = st.slider(
-            "w_any (Unigram Weight)",
-            min_value=0.0,
-            max_value=1.0,
-            value=float(st.session_state.get('W_ANY', 0.3)),
-            step=0.05,
-            key="w_any_slider",
-            help="Trọng số cho unigram hits trong text score"
-        )
-    with col_w_phr:
-        w_phr_slider = st.slider(
-            "w_phr (Phrase Weight)",
-            min_value=0.0,
-            max_value=1.0,
-            value=float(st.session_state.get('W_PHR', 0.7)),
-            step=0.05,
-            key="w_phr_slider",
-            help="Trọng số cho phrase hits trong text score"
-        )
-    
-    # Show current formula
-    current_w_clip = st.session_state.get('W_CLIP', 0.4)
-    current_w_text = st.session_state.get('W_TEXT', 0.6)
-    current_w_any = st.session_state.get('W_ANY', 0.3)
-    current_w_phr = st.session_state.get('W_PHR', 0.7)
-    
-    st.info(f"**Current Formula:** `fused = {current_w_clip}*(clip_total/num_aspects) + {current_w_text}*({current_w_any}*hits_any + {current_w_phr}*hits_phr)`")
-    
-    # Check if weights have changed
-    weights_changed = (
-        current_w_clip != w_clip_slider or
-        current_w_text != w_text_slider or
-        current_w_any != w_any_slider or
-        current_w_phr != w_phr_slider
-    )
-    
-    # Update weights button
-    col_sp2, col_btn_upd_weights = st.columns([5, 1])
-    with col_btn_upd_weights:
-        update_weights = st.button("Update Weights", type="secondary") if weights_changed else None
-    
-    if update_weights:
-        st.session_state['W_CLIP'] = w_clip_slider
-        st.session_state['W_TEXT'] = w_text_slider
-        st.session_state['W_ANY'] = w_any_slider
-        st.session_state['W_PHR'] = w_phr_slider
-        st.success("✅ Fused formula weights updated!")
-        st.rerun()
+    # Debug toggle
+    debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.get("debug_mode", False))
+    st.session_state["debug_mode"] = debug_mode
 
-# Row 4: Query input
-col_max_aspects, col_mode = st.columns([1.2, 2])
+# ============================ SIDEBAR END =======================================
 
-# Apply runtime overrides from session so settings affect ranking
-try:
-    WINDOW_SEC = float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))
-    SKIP_SEC = float(st.session_state.get('SKIP_SEC', SKIP_SEC))
-    DELTA_SEC = float(st.session_state.get('DELTA_SEC', DELTA_SEC))
-    TOP_VIDEOS = int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS))
-except Exception:
-    pass
-
-with col_max_aspects:
-    max_aspects_input = st.text_input(
-        "🎯 Max aspects:",
-        value="",
-        placeholder="Không nhập thì ngẫu nhiên",
-        help="Số lượng aspects Gemini tạo (để trống = tự động)",
-        key="max_aspects_input"
-    )
-
-with col_mode:
-    MODES = [
-            "CLIP Multi-aspects Search",
-            "CLIP Multi-aspects Search + Rerank",
-        "Transcript Seed Search (BM25)",
-            "BM25 Keyword Search",
-            "Search by Video ID",
-    ]
-    search_mode = st.selectbox("🔎 Search Mode", MODES, index=0, key="search_mode_sel")
+st.title("Video Retrieval - CLIP + BM25 Search")
+st.markdown("*Use the sidebar to select a search mode and configure settings.*")
 
 def _mode_key(name: str) -> str:
     return {
@@ -3041,15 +2861,22 @@ elif st.session_state['last_mode'] != search_mode:
     st.session_state['auto_run_after_enhance'] = False
     st.session_state['last_mode'] = search_mode
 
-# Gemini availability toggle (placed below Max aspects and above query input)
-gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
-turn_off_gemini = st.checkbox(
-    "🔌 Turn off Gemini",
-    value=False,
-    key="turn_off_gemini",
-    help="Disable Gemini API to skip Enhance step. Rerank requires Gemini and will be disabled."
+# Apply runtime overrides from session so settings affect ranking
+try:
+    WINDOW_SEC = float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))
+    SKIP_SEC = float(st.session_state.get('SKIP_SEC', SKIP_SEC))
+    DELTA_SEC = float(st.session_state.get('DELTA_SEC', DELTA_SEC))
+    TOP_VIDEOS = int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS))
+except Exception:
+    pass
+
+max_aspects_input = st.text_input(
+    "🎯 Max aspects:",
+    value="",
+    placeholder="Không nhập thì ngẫu nhiên",
+    help="Số lượng aspects Gemini tạo (để trống = tự động)",
+    key="max_aspects_input"
 )
-gemini_available = gemini_configured and not turn_off_gemini
 
 # If Gemini is not available, prevent selecting rerank mode
 if (not gemini_available) and rerank_enabled:
@@ -3057,6 +2884,30 @@ if (not gemini_available) and rerank_enabled:
     search_mode = "CLIP Multi-aspects Search"
     rerank_enabled = False
     bm25_enabled = (search_mode == "BM25 Keyword Search")
+
+# Rerank weight settings
+if rerank_enabled:
+    with st.expander("🔧 Rerank Weight Settings", expanded=False):
+        st.markdown("**Rerank Weight Settings**")
+        col_w_clip, col_w_text, col_w_any, col_w_phr = st.columns(4)
+        w_clip_slider = col_w_clip.slider("w_clip", 0.0, 1.0, float(st.session_state.get('W_CLIP', 0.4)), 0.05, key="w_clip_slider")
+        w_text_slider = col_w_text.slider("w_text", 0.0, 1.0, float(st.session_state.get('W_TEXT', 0.6)), 0.05, key="w_text_slider")
+        w_any_slider = col_w_any.slider("w_any (unigram)", 0.0, 1.0, float(st.session_state.get('W_ANY', 0.3)), 0.05, key="w_any_slider")
+        w_phr_slider = col_w_phr.slider("w_phr (phrase)", 0.0, 1.0, float(st.session_state.get('W_PHR', 0.7)), 0.05, key="w_phr_slider")
+        
+        current_w_clip = st.session_state.get('W_CLIP', 0.4)
+        current_w_text = st.session_state.get('W_TEXT', 0.6)
+        current_w_any = st.session_state.get('W_ANY', 0.3)
+        current_w_phr = st.session_state.get('W_PHR', 0.7)
+        
+        st.info(f"**Current Formula:** `fused = {current_w_clip}*(clip_total/num_aspects) + {current_w_text}*({current_w_any}*hits_any + {current_w_phr}*hits_phr)`")
+        
+        weights_changed = (current_w_clip != w_clip_slider or current_w_text != w_text_slider or current_w_any != w_any_slider or current_w_phr != w_phr_slider)
+        if weights_changed:
+            if st.button("Update Weights", type="secondary", use_container_width=True):
+                st.session_state.update({'W_CLIP': w_clip_slider, 'W_TEXT': w_text_slider, 'W_ANY': w_any_slider, 'W_PHR': w_phr_slider})
+                st.success("✅ Rerank weight settings updated!")
+                st.rerun()
 
 # BM25 options when enabled
 if bm25_enabled:
@@ -3452,10 +3303,6 @@ else:
 # Row 5: Logs expander
 log_exp = st.expander("📝 Logs", expanded=False)
 log_container = log_exp.empty()
-
-# Debug toggle
-debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.get("debug_mode", False))
-st.session_state["debug_mode"] = debug_mode
 
 def run_with_logs(fn, *args, **kwargs):
     buf = io.StringIO()
