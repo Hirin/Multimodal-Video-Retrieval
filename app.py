@@ -3146,7 +3146,6 @@ elif bm25_seed_enabled:
                 st.session_state["enhanced_data"] = None
                 # Clear all caches when resetting
                 st.session_state.pop('clip_cache', None)
-                st.session_state.pop('bm25_cache', None)
                 st.session_state.pop('seed_cache', None)
                 st.session_state.pop('video_cache', None)
                 st.session_state.pop('rerank_cache', None)
@@ -3266,7 +3265,6 @@ elif gemini_available:
             _clear_run_flags()
             # Clear all caches when resetting
             st.session_state.pop('clip_cache', None)
-            st.session_state.pop('bm25_cache', None)
             st.session_state.pop('seed_cache', None)
             st.session_state.pop('video_cache', None)
             st.session_state.pop('rerank_cache', None)
@@ -3359,12 +3357,6 @@ else:
         st.write(f"🔍 Debug - Preserving CLIP cache (staying in CLIP modes)")
         st.write(f"🔍 Debug - CLIP cache exists: {bool(st.session_state.get('clip_cache'))}")
 
-# For BM25 Keyword Search: Only clear when explicitly requested (Reset button)
-if active_key != "bm25_kw":
-    if debug_mode:
-        st.write(f"🔍 Debug - Clearing BM25 cache (switching away from BM25 Keyword)")
-    st.session_state.pop('bm25_cache', None)
-
 # For Transcript Seed Search: Only clear when explicitly requested (Reset button)
 if active_key != "bm25_seed":
     if debug_mode:
@@ -3407,97 +3399,69 @@ if run:
         with log_container.container():
             st.text("🔍 Running BM25 keyword search...")
 
-        # Build cache key for BM25 results
+        # BM25 Keyword Search - No caching, always run fresh search
         try:
-            bm25_cache_key = json.dumps({
-                "query": query_vi,
-                "limit": TOP_VIDEOS,
-                "exclude_series": exclude_series_list,
-                "exclude_videos": exclude_videos_list,
-                "time_threshold": 30.0
-            }, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            bm25_cache_key = None
+            with st.spinner("🔎 Đang search BM25..."):
+                bm25_results = bm25_search_videos(query_vi, limit=TOP_VIDEOS)
 
-        # Check cache
-        bm25_cache_hit = bool(st.session_state.get("bm25_cache") and st.session_state["bm25_cache"].get("key") == bm25_cache_key)
-        
-        if bm25_cache_hit:
-            if debug_mode:
-                st.write(f"🔍 Debug - Using cached BM25 results")
-            bm25_results = st.session_state["bm25_cache"]["results"]
-        else:
-            try:
-                with st.spinner("🔎 Đang search BM25..."):
-                    bm25_results = bm25_search_videos(query_vi, limit=TOP_VIDEOS)
+                # Apply search filters
+                bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
 
-                    # Apply search filters
-                    bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
+                # Remove duplicate results that are too close in time
+                bm25_results = deduplicate_bm25_results(bm25_results, time_threshold=30.0)
 
-                    # Remove duplicate results that are too close in time
-                    bm25_results = deduplicate_bm25_results(bm25_results, time_threshold=30.0)
+                # Highlight is always enabled for BM25 results
+                with log_container.container():
+                    st.text("🔍 Running BM25 keyword search...")
+                    st.text(f"Found {len(bm25_results)} results")
 
-                    # Save cache
-                    try:
-                        st.session_state["bm25_cache"] = {
-                            "key": bm25_cache_key,
-                            "results": bm25_results
-                        }
-                    except Exception:
-                        pass
+        except Exception as e:
+            st.error(f"BM25 search failed: {e}")
+            st.info("Make sure BM25 databases exist in the data directory")
+            st.stop()
 
-                    # Highlight is always enabled for BM25 results
-                    with log_container.container():
-                        st.text("🔍 Running BM25 keyword search...")
-                        st.text(f"Found {len(bm25_results)} results")
+        if bm25_results:
+            # Display BM25 results
+            with clip_results_container.container():
+                st.subheader("🔍 BM25 Keyword Search Results")
 
-            except Exception as e:
-                st.error(f"BM25 search failed: {e}")
-                st.info("Make sure BM25 databases exist in the data directory")
-                st.stop()
+                for i, result in enumerate(bm25_results):
+                    vid = result["video_id"]
+                    score = result["score"]
+                    snippet = result["snippet"]
+                    timestamp = result["timestamp"]
 
-            if bm25_results:
-                # Display BM25 results
-                with clip_results_container.container():
-                    st.subheader("🔍 BM25 Keyword Search Results")
+                    with st.container():
+                        # Header with keyframe
+                        col_img, col_info = st.columns([1, 3])
 
-                    for i, result in enumerate(bm25_results):
-                        vid = result["video_id"]
-                        score = result["score"]
-                        snippet = result["snippet"]
-                        timestamp = result["timestamp"]
+                        with col_img:
+                            # Find keyframe closest to timestamp
+                            target_keyframe = timestamp_to_keyframe_number(vid, timestamp)
+                            keyframe_img, actual_frame = find_best_keyframe(vid, target_keyframe)
 
-                        with st.container():
-                            # Header with keyframe
-                            col_img, col_info = st.columns([1, 3])
+                            if keyframe_img is not None and keyframe_img.size[0] > 100:
+                                st.image(keyframe_img, caption=f"Keyframe {actual_frame}", width='stretch')
+                            else:
+                                # Fallback image if keyframe not found
+                                fallback_img = Image.fromarray(np.full((180, 320, 3), 200, dtype=np.uint8))
+                                st.image(fallback_img, caption=f"No keyframe at ~{sec_to_mmss(timestamp)}", width='stretch')
 
-                            with col_img:
-                                # Find keyframe closest to timestamp
-                                target_keyframe = timestamp_to_keyframe_number(vid, timestamp)
-                                keyframe_img, actual_frame = find_best_keyframe(vid, target_keyframe)
+                        with col_info:
+                            st.markdown(f"**[{i+1}] {vid}** · BM25 Score: {score:.3f}")
+                            st.markdown(f"**Timestamp:** {sec_to_mmss(timestamp)} | **Keyframe:** {actual_frame}")
+                            st.markdown(f"**Source:** {result['db_source'].upper()}")
 
-                                if keyframe_img is not None and keyframe_img.size[0] > 100:
-                                    st.image(keyframe_img, caption=f"Keyframe {actual_frame}", width='stretch')
-                                else:
-                                    # Fallback image if keyframe not found
-                                    fallback_img = Image.fromarray(np.full((180, 320, 3), 200, dtype=np.uint8))
-                                    st.image(fallback_img, caption=f"No keyframe at ~{sec_to_mmss(timestamp)}", width='stretch')
+                            # Display highlighted full text
+                            highlighted_text = result.get("highlighted_full_text", snippet)
+                            st.markdown(f"""
+                                <div class="bm25-fulltext">
+                                    <strong>Full Text:</strong> {highlighted_text}
+                                </div>
+                            """, unsafe_allow_html=True)
 
-                            with col_info:
-                                st.markdown(f"**[{i+1}] {vid}** · BM25 Score: {score:.3f}")
-                                st.markdown(f"**Timestamp:** {sec_to_mmss(timestamp)} | **Keyframe:** {actual_frame}")
-                                st.markdown(f"**Source:** {result['db_source'].upper()}")
-
-                                # Display highlighted full text
-                                highlighted_text = result.get("highlighted_full_text", snippet)
-                                st.markdown(f"""
-                                    <div class="bm25-fulltext">
-                                        <strong>Full Text:</strong> {highlighted_text}
-                                    </div>
-                                """, unsafe_allow_html=True)
-
-                        # Try to get watch URL and display video player
-                        url = get_watch_url(vid)
+                    # Try to get watch URL and display video player
+                    url = get_watch_url(vid)
                     if url:
                         with st.popover("🎥 Watch Video", width='stretch'):
                             st.markdown(create_popover_css(), unsafe_allow_html=True)
@@ -3552,9 +3516,9 @@ if run:
                     else:
                         st.markdown("No video URL available")
 
-                        st.divider()
-            else:
-                st.warning("No BM25 search results found. Try different keywords or check if BM25 databases exist.")
+                    st.divider()
+        else:
+            st.warning("No BM25 search results found. Try different keywords or check if BM25 databases exist.")
 
         # Don't continue with CLIP search when BM25 is enabled
         st.stop()
