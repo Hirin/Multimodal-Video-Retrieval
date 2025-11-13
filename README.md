@@ -102,6 +102,44 @@ If `n` is missing, the app estimates frames from time and `fps` plus heuristic t
 
 ---
 
+## 📂 Code Structure
+
+The application uses a **modular architecture** for better maintainability and testability:
+
+```
+Multimodal-Video-Retrieval/
+├── app.py                      # Main Streamlit application (1412 lines)
+├── config/
+│   └── settings.py            # Configuration management, environment variables
+├── models/
+│   └── video.py               # Data models (VideoMetadata, SearchResult, etc.)
+├── services/
+│   ├── clip_service.py        # CLIP text encoding and similarity computation
+│   ├── database.py            # SQLite FTS5 database operations
+│   ├── text_search.py         # BM25 text search and transcript snippets
+│   ├── gemini_service.py      # Gemini AI query enhancement
+│   ├── fallback_service.py    # Translation fallback when Gemini unavailable
+│   ├── video_service.py       # Video file and keyframe management
+│   └── server.py              # Flask video streaming server
+├── utils/
+│   ├── helpers.py             # Utility functions (time formatting, normalization)
+│   ├── logger.py              # Logging configuration
+│   └── session_state.py       # Streamlit session state management
+├── components/
+│   └── styling.py             # UI components and CSS styling
+└── requirements.txt           # Python dependencies
+```
+
+**Benefits:**
+- ✅ **Modular Design**: Clear separation of concerns (UI, business logic, data)
+- ✅ **Reusable Services**: Each service can be tested independently
+- ✅ **Centralized Config**: All settings in `config/settings.py`
+- ✅ **Type Safety**: Type hints throughout the codebase
+- ✅ **Better Logging**: Structured logging with proper log levels
+- ✅ **Maintainable**: ~68% code reduction from original monolithic file
+
+---
+
 ## 🧰 Minimum Requirements
 
 - **Python**: 3.10+ (recommended 3.11)
