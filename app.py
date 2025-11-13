@@ -1,18 +1,19 @@
+"""
+Multimodal Video Retrieval Application
+
+A Streamlit-based video retrieval system using CLIP embeddings and BM25 text search.
+Refactored to use modular architecture with services, utilities, and components.
+"""
+
 import os
 import io
-import re
 import json
-import glob
 import time
-import sqlite3
+import shutil
 import concurrent.futures
 from pathlib import Path
-from collections import deque
+from collections import deque, defaultdict
 from typing import List, Dict, Tuple, Optional
-
-import shutil
-import threading
-from flask import Flask, request, Response, send_file
 
 import numpy as np
 import pandas as pd
@@ -20,191 +21,96 @@ from PIL import Image
 
 import streamlit as st
 import streamlit.components.v1 as components
-from deep_translator import GoogleTranslator
 
-import sqlite3, math, re, unicodedata
-from collections import defaultdict
+# Import configuration
+from config import settings
 
-# Reset watch mode keys on app start/refresh to default to Youtube Online
-if 'app_initialized' not in st.session_state:
-    st.session_state.app_initialized = True
-    # Clear all watch mode keys to default to Youtube Online
-    keys_to_reset = [key for key in st.session_state.keys() if key.startswith("watch_mode_")]
-    for key in keys_to_reset:
-        del st.session_state[key]
+# Import models
+from models.video import SearchResult, VideoMetadata
+
+# Import services
+from services.clip_service import (
+    ensure_clip_text_encoder,
+    encode_text as clip_encode_text,
+    compute_similarity
+)
+from services.text_search import (
+    bm25_search_videos,
+    deduplicate_bm25_results,
+    get_transcript_snippets_with_highlights
+)
+from services.gemini_service import (
+    extract_aspects_and_seeds_with_gemini,
+    create_fallback_enhanced_data
+)
+from services.fallback_service import fallback_translate_and_create_aspects
+from services.video_service import (
+    keyframe_path,
+    npy_path_for_video,
+    map_csv_path_for_video,
+    keep_idxs_path_for_video,
+    safe_imread,
+    get_fps_from_csv,
+    timestamp_to_keyframe_number,
+    load_times_for_video,
+    load_video_features,
+    list_videos_from_dirs
+)
+from services.database import (
+    convert_bm25_syntax,
+    highlight_keywords_in_text,
+    count_matches,
+    build_bm25_query_from_seeds
+)
+from services.server import make_video_app, ensure_server_once
+
+# Import utilities
+from utils.helpers import (
+    l2_normalize_rows,
+    sec_to_mmss,
+    parse_mmss,
+    dataset_for_video
+)
+from utils.session_state import SessionStateManager
+from utils.logger import get_logger
+
+# Import components
+from components.styling import (
+    create_popover_css,
+    create_loading_overlay,
+    create_dialog_loading_html,
+    create_success_html,
+    create_error_html
+)
+
+# Initialize logger
+logger = get_logger('app')
+
+# Initialize session state
+SessionStateManager.initialize()
 
 # ============================ KAGGLE DOWNLOADER ============================
-def create_popover_css():
-    """Create CSS to improve popover size and appearance"""
-    return """
-    <style>
-    .stPopover {
-        min-width: 450px !important;
-        min-height: 100px !important;
-        padding: 25px !important;
-        border-radius: 12px !important;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15) !important;
-    }
-    .stPopover > div {
-        padding: 25px !important;
-        min-height: 80px !important;
-    }
-    .stPopover [data-testid="stRadio"] {
-        margin: 10px 0 !important;
-    }
-    .stPopover [data-testid="stRadio"] > div {
-        gap: 15px !important;
-    }
-    </style>
-    """
-
-
-
-def create_loading_overlay(message: str):
-    """Create a custom loading overlay with blur background"""
-    return f"""
-    <div style="
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0, 0, 0, 0.7);
-        backdrop-filter: blur(5px);
-        z-index: 9999;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    ">
-        <div style="
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 40px;
-            border-radius: 20px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-            text-align: center;
-            color: white;
-            max-width: 400px;
-            animation: pulse 2s infinite;
-        ">
-            <div style="
-                font-size: 48px;
-                margin-bottom: 20px;
-                animation: spin 1s linear infinite;
-            ">⏳</div>
-            <h3 style="margin: 0 0 10px 0; font-size: 24px; font-weight: 600;">Đang tải video...</h3>
-            <p style="margin: 0; font-size: 16px; opacity: 0.9;">{message}</p>
-            <div style="
-                margin-top: 20px;
-                width: 100%;
-                height: 4px;
-                background: rgba(255, 255, 255, 0.3);
-                border-radius: 2px;
-                overflow: hidden;
-            ">
-                <div style="
-                    height: 100%;
-                    background: linear-gradient(90deg, #00d4ff, #00ff88);
-                    border-radius: 2px;
-                    animation: progress 2s ease-in-out infinite;
-                "></div>
-            </div>
-        </div>
-    </div>
-    
-    <style>
-        @keyframes spin {{
-            0% {{ transform: rotate(0deg); }}
-            100% {{ transform: rotate(360deg); }}
-        }}
-        @keyframes pulse {{
-            0%, 100% {{ transform: scale(1); }}
-            50% {{ transform: scale(1.05); }}
-        }}
-        @keyframes progress {{
-            0% {{ width: 0%; }}
-            50% {{ width: 70%; }}
-            100% {{ width: 100%; }}
-        }}
-    </style>
-    """
 
 def reset_watch_mode_keys():
     """Reset all watch mode keys to default (Youtube Online)"""
-    # Don't reset if we're in a dialog context
-    if 'dialog_context' in st.session_state:
-        return
-        
-    # Get all session state keys that start with watch_mode
-    keys_to_reset = [key for key in st.session_state.keys() if key.startswith("watch_mode_")]
-    
-    for key in keys_to_reset:
-        del st.session_state[key]
-
+    if not SessionStateManager.is_dialog_active():
+        SessionStateManager.clear_watch_modes()
 
 
 @st.dialog("Đang tải video...")
 def download_video_dialog(video_id: str, local_video_root: Path):
     """Show download dialog with loading animation and run download logic inside"""
-    
+
     # Set dialog context to prevent watch mode reset
-    st.session_state['dialog_context'] = True
-    
+    SessionStateManager.set_dialog_context(True)
+
     # Create placeholder for dynamic content
     content_placeholder = st.empty()
-    
+
     # Show loading animation
     loading_message = f"File chưa có sẵn. Đang tải {video_id}.mp4 từ Kaggle..."
-    content_placeholder.markdown(f"""
-    <div style="
-        text-align: center;
-        padding: 40px 20px;
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    ">
-        <div style="
-            font-size: 60px;
-            margin-bottom: 30px;
-            animation: spin 1s linear infinite;
-        ">⏳</div>
-        <div style="font-size: 24px; font-weight: 600; color: #333; margin-bottom: 20px;">
-            Đang tải video...
-        </div>
-        <div style="font-size: 18px; color: #666; margin-bottom: 30px;">
-            {loading_message}
-        </div>
-        <div style="font-size: 16px; color: #999;">
-            Vui lòng đợi trong giây lát...
-        </div>
-        <div style="
-            margin-top: 40px;
-            width: 100%;
-            height: 8px;
-            background: #f0f0f0;
-            border-radius: 4px;
-            overflow: hidden;
-        ">
-            <div style="
-                height: 100%;
-                background: linear-gradient(90deg, #667eea, #764ba2);
-                border-radius: 4px;
-                animation: progress 2s ease-in-out infinite;
-            "></div>
-        </div>
-    </div>
-    
-    <style>
-        @keyframes spin {{
-            0% {{ transform: rotate(0deg); }}
-            100% {{ transform: rotate(360deg); }}
-        }}
-        @keyframes progress {{
-            0% {{ width: 0%; }}
-            50% {{ width: 70%; }}
-            100% {{ width: 100%; }}
-        }}
-    </style>
-    """, unsafe_allow_html=True)
-    
+    content_placeholder.markdown(create_dialog_loading_html(loading_message), unsafe_allow_html=True)
+
     # Run download logic inside dialog
     try:
         # Pre-flight checks
@@ -218,110 +124,49 @@ def download_video_dialog(video_id: str, local_video_root: Path):
         if not (kaggle_config_dir / "kaggle.json").exists():
             content_placeholder.error("Lỗi: Không tìm thấy file .kaggle/kaggle.json. Vui lòng đặt Kaggle API token của bạn vào đó.")
             return None
-                                
+
         os.environ["KAGGLE_CONFIG_DIR"] = str(kaggle_config_dir)
 
         dataset_handle = "ndmhoang/hcm25-batch1-videos" if video_id.startswith("L") else "duyminhhong/hcmai25-batch2-videos"
         remote_file_path = f"video/{video_id}.mp4"
         local_video_root.mkdir(exist_ok=True)
 
-        print(f"[KaggleHub] Downloading {remote_file_path} from {dataset_handle}...")
-        
+        logger.info(f"[KaggleHub] Downloading {remote_file_path} from {dataset_handle}...")
+
         # Download to system cache
         cached_path_str = kagglehub.dataset_download(dataset_handle, path=remote_file_path)
         cached_path = Path(cached_path_str)
-        print(f"[KaggleHub] Downloaded to cache: {cached_path}")
+        logger.info(f"[KaggleHub] Downloaded to cache: {cached_path}")
 
         # Move the file from cache to our local ./videos directory
         local_video_path = local_video_root / f"{video_id}.mp4"
         shutil.move(cached_path, local_video_path)
-        print(f"[KaggleHub] Moved to: {local_video_path}")
+        logger.info(f"[KaggleHub] Moved to: {local_video_path}")
 
         # Show success message
-        content_placeholder.markdown(f"""
-        <div style="
-            text-align: center;
-            padding: 40px 20px;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        ">
-            <div style="
-                font-size: 60px;
-                margin-bottom: 30px;
-                animation: bounce 0.6s ease-in-out;
-            ">✅</div>
-            <div style="font-size: 24px; font-weight: 600; color: #333; margin-bottom: 20px;">
-                Tải thành công!
-            </div>
-            <div style="font-size: 18px; color: #666;">
-                Video đã được tải về thành công
-            </div>
-        </div>
-        
-        <style>
-            @keyframes bounce {{
-                0%, 20%, 50%, 80%, 100% {{ transform: translateY(0); }}
-                40% {{ transform: translateY(-10px); }}
-                60% {{ transform: translateY(-5px); }}
-            }}
-        </style>
-        """, unsafe_allow_html=True)
-        
+        content_placeholder.markdown(create_success_html(), unsafe_allow_html=True)
+
         # Wait a bit then close dialog
         time.sleep(2.0)
         # Clear dialog context before rerun
-        if 'dialog_context' in st.session_state:
-            del st.session_state['dialog_context']
-        # Preserve video cache when rerunning after download
-        if 'video_cache' in st.session_state:
-            # Keep the cache intact
-            pass
+        SessionStateManager.set_dialog_context(False)
         st.rerun()  # Refresh the main UI to show the video player
         return local_video_path
 
     except Exception as e:
         error_message = str(e)
-        print(f"[KaggleHub Error] {error_message}")
-        
+        logger.error(f"[KaggleHub Error] {error_message}")
+
         # Show error message
-        content_placeholder.markdown(f"""
-        <div style="
-            text-align: center;
-            padding: 40px 20px;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-        ">
-            <div style="
-                font-size: 60px;
-                margin-bottom: 30px;
-                animation: shake 0.5s ease-in-out;
-            ">❌</div>
-            <div style="font-size: 24px; font-weight: 600; color: #333; margin-bottom: 20px;">
-                Tải thất bại!
-            </div>
-            <div style="font-size: 18px; color: #666;">
-                Có lỗi xảy ra trong quá trình tải video
-            </div>
-        </div>
-        
-        <style>
-            @keyframes shake {{
-                0%, 100% {{ transform: translateX(0); }}
-                25% {{ transform: translateX(-5px); }}
-                75% {{ transform: translateX(5px); }}
-            }}
-        </style>
-        """, unsafe_allow_html=True)
-        
+        content_placeholder.markdown(create_error_html(), unsafe_allow_html=True)
+
         # Wait a bit then close dialog
         time.sleep(3.0)
         # Clear dialog context before rerun
-        if 'dialog_context' in st.session_state:
-            del st.session_state['dialog_context']
-        # Preserve video cache when rerunning after error
-        if 'video_cache' in st.session_state:
-            # Keep the cache intact
-            pass
+        SessionStateManager.set_dialog_context(False)
         st.rerun()  # Refresh the main UI
         return None
+
 
 def download_video_from_kaggle(video_id: str, local_video_root: Path, placeholder) -> Optional[Path]:
     """
@@ -329,248 +174,54 @@ def download_video_from_kaggle(video_id: str, local_video_root: Path, placeholde
     local videos folder, and shows a user-friendly dialog on the UI during the process.
     """
     local_video_path = local_video_root / f"{video_id}.mp4"
-    
+
     # Debug info
-    print(f"[Download] Checking video: {video_id}")
-    print(f"[Download] Local path: {local_video_path}")
-    print(f"[Download] Path exists: {local_video_path.exists()}")
-    
+    logger.debug(f"[Download] Checking video: {video_id}")
+    logger.debug(f"[Download] Local path: {local_video_path}")
+    logger.debug(f"[Download] Path exists: {local_video_path.exists()}")
+
     if local_video_path.exists():
-        print(f"[Download] Video already exists, returning path")
+        logger.debug(f"[Download] Video already exists, returning path")
         placeholder.empty()
         return local_video_path
-    
-    print(f"[Download] Video not found, starting download dialog")
+
+    logger.info(f"[Download] Video not found, starting download dialog")
     # Show download dialog that runs download logic
     result = download_video_dialog(video_id, local_video_root)
-    
-    print(f"[Download] Dialog result: {result}")
+
+    logger.debug(f"[Download] Dialog result: {result}")
     # Return the path if it exists after download
     if result and result.exists():
-        print(f"[Download] Download successful, returning path")
+        logger.info(f"[Download] Download successful, returning path")
         return result
     else:
-        print(f"[Download] Download failed or no result")
+        logger.warning(f"[Download] Download failed or no result")
         return None
 
 
-# ============================ LOCAL VIDEO SERVER ============================
-def make_video_app(root_dir: str) -> Flask:
-    """Creates a Flask app to serve video files with Range requests."""
-    app = Flask(__name__)
+# ============================ PARQUET KEYFRAMES DATA ============================
 
-    @app.after_request
-    def add_cors(resp):
-        resp.headers["Access-Control-Allow-Origin"] = "*"
-        resp.headers["Access-Control-Allow-Headers"] = "Range, Origin, Content-Type, Accept"
-        resp.headers["Access-Control-Expose-Headers"] = "Content-Range, Accept-Ranges, Content-Length"
-        resp.headers["Accept-Ranges"] = "bytes"
-        return resp
-
-    @app.route("/video/<path:filename>")
-    def serve_video(filename: str):
-        filepath = os.path.join(root_dir, filename)
-        if not os.path.isfile(filepath):
-            return "Not found", 404
-        return send_file(filepath, mimetype="video/mp4", as_attachment=False, conditional=True)
-    return app
-
-def ensure_server_once(app: Flask, host="127.0.0.1", port=8801):
-    """Ensures the Flask server is started only once in a background thread."""
-    if not st.session_state.get("_local_video_server_started"):
-        threading.Thread(target=lambda: app.run(host=host, port=port, debug=False, use_reloader=False), daemon=True).start()
-        st.session_state["_local_video_server_started"] = True
-        print(f"[Server] Local video server started on http://{host}:{port}")
-
-# ============================ .env LOADING (no external deps) ============================
-if os.path.exists('.env'):
+@st.cache_data
+def get_keyframes_data():
+    """Load and cache keyframes data from parquet files"""
+    data = {}
     try:
-        with open('.env', 'r', encoding='utf-8') as f:
-            for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#') or '=' not in line:
-                        continue
-                    k, v = line.split('=', 1)
-                    k = k.strip(); v = v.strip().strip('"').strip("'")
-                    if k and k not in os.environ:
-                        os.environ[k] = v
-    except Exception:
-        pass
+        # B1 keyframes
+        b1_parquet = f"{settings.DATA_ROOT}b1/keyframes-info.parquet"
+        if os.path.exists(b1_parquet):
+            data['b1'] = pd.read_parquet(b1_parquet)
+            logger.info(f"Loaded B1 keyframes data: {len(data['b1'])} rows")
 
-# ============================ DEFAULT CONFIG (as requested) ==============================
-DATA_ROOT = os.environ.get("DATA_ROOT", "/mnt/shared/HCMC-AI/")
-DEFAULT_TOP_K = 20
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-
-B1 = {
-    "clip_dir": f"{DATA_ROOT}b1/clip-features-32",
-    "map_csv": f"{DATA_ROOT}b1/map-keyframes",
-    "kf_root": f"{DATA_ROOT}b1/keyframes",
-    "vid_root": f"{DATA_ROOT}b1/video",
-    "keep_dir": f"{DATA_ROOT}b1/clip_keep_idxs",
-}
-
-B2 = {
-    "clip_dir": f"{DATA_ROOT}b2/clip-features-32",
-    "map_csv": f"{DATA_ROOT}b2/map-keyframes",
-    "kf_root": f"{DATA_ROOT}b2/keyframes",
-    "vid_root": f"{DATA_ROOT}b2/video",
-    "keep_dir": f"{DATA_ROOT}b2/clip_keep_idxs",
-}
-
-# Find BM25 database paths
-def find_db_path(data_root, batch_name):
-    """Find the BM25 database path for a given batch"""
-    import glob
-
-    # Try common locations
-    possible_paths = [
-        f"{data_root}{batch_name}/text_bm25.db",
-        f"{data_root}{batch_name}/text_bm25.db",
-    ]
-
-    for path in possible_paths:
-        if os.path.exists(path):
-            return path
-
-    # Search recursively for .db files
-    search_pattern = f"{data_root}{batch_name}/**/*.db"
-    db_files = glob.glob(search_pattern, recursive=True)
-    bm25_files = [f for f in db_files if 'bm25' in f.lower() or 'text' in f.lower()]
-
-    if bm25_files:
-        return bm25_files[0]
-
-    return None
-
-B1_DB_PATH = find_db_path(DATA_ROOT, "b1")
-B2_DB_PATH = find_db_path(DATA_ROOT, "b2")
-
-DATASETS = {"b1", "b2"}
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_MAX_TOKENS = 10000
-# Use GOOGLE_API_KEY for Gemini
-GEMINI_API_KEY = GOOGLE_API_KEY
-USE_LLM_ASPECTS = bool(GEMINI_API_KEY)
-WINDOW_SEC = 40.0
-SKIP_SEC = 0.0
-DELTA_SEC = 20.0
-TOP_VIDEOS = 20
-LIMIT_VIDEOS = None
-EXCLUDE_SER = set()
-LOCAL_VIDEO_ROOT = Path("./videos")
-LOCAL_VIDEO_URL_BASE = "http://127.0.0.1:8801/video"
-
-# ================================== UTILS ===============================================
-def l2_normalize_rows(x: np.ndarray) -> np.ndarray:
-    x = x.astype("float32", copy=False)
-    n = np.linalg.norm(x, axis=1, keepdims=True) + 1e-12
-    return x / n
-
-def sec_to_mmss(t: float) -> str:
-    if t < 0 or not np.isfinite(t):
-        return "00:00"
-    m = int(t // 60)
-    s = int(round(t - m * 60))
-    if s == 60:
-        m, s = m + 1, 0
-    return f"{m:02d}:{s:02d}"
-
-def parse_mmss(s: str, default_sec: float = 0.0) -> float:
-    """Parse 'mm:ss' or raw seconds string to float seconds. Returns default on error."""
-    try:
-        s = (s or "").strip()
-        if not s:
-            return float(default_sec)
-        if ":" in s:
-            parts = s.split(":", 1)
-            mm = int(parts[0]) if parts[0] else 0
-            ss = int(parts[1]) if parts[1] else 0
-            return max(0.0, float(mm * 60 + ss))
-        # fallback: raw seconds
-        val = float(s)
-        return max(0.0, val)
-    except Exception:
-        return float(default_sec)
-
-def dataset_for_video(video_id: str) -> str:
-    return "b1" if video_id.startswith("L") else "b2"
-
-def keyframe_path(video_id: str, frame_id: int) -> str:
-    D = B1 if dataset_for_video(video_id) == "b1" else B2
-    L, V = video_id.split("_")
-    base = f"{D['kf_root']}/{L}/{V}"
-    digits = (3, 4) if dataset_for_video(video_id) == "b1" else (4, 3)
-    frames_try = (frame_id, max(0, frame_id - 1))
-    exts = (".jpg", ".jpeg", ".png")
-    for d in digits:
-        for fr in frames_try:
-            for ext in exts:
-                p = f"{base}/{fr:0{d}d}{ext}"
-                if os.path.exists(p):
-                    return p
-    return f"{base}/{frame_id:0{digits[0]}d}.jpg"
-
-def npy_path_for_video(video_id: str) -> str:
-    D = B1 if dataset_for_video(video_id) == "b1" else B2
-    return f"{D['clip_dir']}/{video_id}.npy"
-
-def map_csv_path_for_video(video_id: str) -> str:
-    D = B1 if dataset_for_video(video_id) == "b1" else B2
-    return f"{D['map_csv']}/{video_id}.csv"
-
-def keep_idxs_path_for_video(video_id: str) -> str:
-    D = B1 if dataset_for_video(video_id) == "b1" else B2
-    return f"{D['keep_dir']}/{video_id}_keep_idxs.npy"
-
-def safe_imread(path: str) -> Image.Image:
-    try:
-        if os.path.exists(path):
-            return Image.open(path).convert("RGB")
-        else:
-            # Return None if file doesn't exist, don't return fallback
-            return None
-    except Exception:
-        return None
-
-def timestamp_to_keyframe_number(vid: str, timestamp: float) -> int:
-    """Convert timestamp to keyframe number using map-keyframes CSV"""
-    try:
-        # Try to read map-keyframes CSV for exact mapping
-        D = B1 if dataset_for_video(vid) == "b1" else B2
-        map_csv_path = f"{D['map_csv']}/{vid}.csv"
-
-        if os.path.exists(map_csv_path):
-            import pandas as pd
-            df = pd.read_csv(map_csv_path)
-
-            if 'pts_time' in df.columns and 'n' in df.columns:
-                # Find the keyframe with timestamp closest to the target
-                df['time_diff'] = abs(df['pts_time'] - timestamp)
-                closest_row = df.loc[df['time_diff'].idxmin()]
-
-                # Return the keyframe number (n column)
-                keyframe_num = int(closest_row['n'])
-                print(f"[Keyframe] Found exact mapping: timestamp {timestamp:.2f}s -> keyframe {keyframe_num}")
-                return keyframe_num
-
+        # B2 keyframes
+        b2_parquet = f"{settings.DATA_ROOT}b2/keyframes-info.parquet"
+        if os.path.exists(b2_parquet):
+            data['b2'] = pd.read_parquet(b2_parquet)
+            logger.info(f"Loaded B2 keyframes data: {len(data['b2'])} rows")
     except Exception as e:
-        print(f"[Keyframe] Error reading map CSV for {vid}: {e}")
+        logger.error(f"Error loading keyframes data: {e}")
 
-    # Fallback: estimate based on typical keyframe extraction rate
-    fps = get_fps_from_csv(vid) or 25.0
-    estimated_frame = int(timestamp * fps)
+    return data
 
-    # For batch 2, keyframes seem to be more frequent (every ~1-2 seconds)
-    if dataset_for_video(vid) == "b1":
-        keyframe_interval = 25  # ~1 second at 25fps
-    else:  # batch 2
-        keyframe_interval = 50  # More conservative for batch 2
-
-    estimated_keyframe = max(1, estimated_frame // keyframe_interval)
-    print(f"[Keyframe] Using estimation: timestamp {timestamp:.2f}s -> estimated keyframe {estimated_keyframe}")
-
-    return estimated_keyframe
 
 def find_best_keyframe(vid: str, target_frame: int) -> tuple:
     """Find the best available keyframe closest to target_frame, using parquet data for filtering"""
@@ -597,2051 +248,318 @@ def find_best_keyframe(vid: str, target_frame: int) -> tuple:
                             if not is_canonical:
                                 continue  # Skip non-canonical frames
 
-                img = safe_imread(keyframe_path(vid, frame))
-                if img is not None:  # Valid image exists
-                    return img, frame
+                        # This is a valid canonical frame
+                        kf_path = keyframe_path(vid, frame)
+                        if os.path.exists(kf_path):
+                            return (frame, kf_path)
             except Exception as e:
-                print(f"[KEYFRAME] Error checking frame {frame} for {vid}: {e}")
+                logger.debug(f"Error checking frame {frame}: {e}")
                 continue
 
-    # If no frames found around target, try to find any available canonical frame
-    # by scanning the keyframe directory
-    D = B1 if dataset_for_video(vid) == "b1" else B2
-    L, V = vid.split("_")
-    kf_dir = f"{D['kf_root']}/{L}/{V}"
+    # Fallback: use target_frame even if not in parquet
+    kf_path = keyframe_path(vid, target_frame)
+    return (target_frame, kf_path)
 
-    if os.path.exists(kf_dir):
-        try:
-            from pathlib import Path
-            # Get all image files in the directory
-            image_files = []
-            for ext in ['*.jpg', '*.jpeg', '*.png']:
-                image_files.extend(list(Path(kf_dir).glob(ext)))
 
-            if image_files:
-                # Sort by frame number (extract number from filename)
-                def extract_frame_num(filepath):
-                    try:
-                        filename = filepath.stem
-                        # Extract number from filename (remove leading zeros)
-                        return int(filename.lstrip('0') or '0')
-                    except (ValueError, AttributeError):
-                        return 0
+def get_fps_from_csv_safe(vid: str) -> float:
+    """Safely get FPS from CSV, with fallback"""
+    fps = get_fps_from_csv(vid)
+    return fps if fps else 25.0
 
-                image_files.sort(key=extract_frame_num)
 
-                # Filter by canonical keyframes from parquet data
-                canonical_frames = []
-                try:
-                    if dataset in keyframes_data:
-                        df = keyframes_data[dataset]
-                        video_frames = df[df['video_id'] == vid]
+# ============================ VIDEO LISTING ============================
 
-                        if dataset == 'b1':
-                            # B1 uses all frames in keyframes_keepers
-                            canonical_frames = video_frames['n'].tolist() if 'n' in video_frames.columns else []
-                        else:
-                            # B2 uses only canonical frames
-                            if 'is_canonical' in video_frames.columns:
-                                canonical_frames = video_frames[video_frames['is_canonical'] == True]['n'].tolist()
-                            else:
-                                canonical_frames = video_frames['n'].tolist() if 'n' in video_frames.columns else []
-                except Exception as e:
-                    print(f"[KEYFRAME] Error filtering canonical frames: {e}")
-                    canonical_frames = []
-
-                # Try the frame closest to target_frame from canonical list
-                target_file = None
-                min_diff = float('inf')
-
-                for img_file in image_files:
-                    frame_num = extract_frame_num(img_file)
-                    # Only consider canonical frames
-                    if canonical_frames and frame_num not in canonical_frames:
-                        continue
-
-                    diff = abs(frame_num - target_frame)
-                    if diff < min_diff:
-                        min_diff = diff
-                        target_file = img_file
-
-                if target_file:
-                    img = safe_imread(str(target_file))
-                    if img is not None:
-                        frame_num = extract_frame_num(target_file)
-                        return img, frame_num
-
-                # If still no good image, try the last available canonical frame
-                for img_file in reversed(image_files):
-                    frame_num = extract_frame_num(img_file)
-                    if not canonical_frames or frame_num in canonical_frames:
-                        img = safe_imread(str(img_file))
-                        if img is not None:
-                            return img, frame_num
-
-        except Exception as e:
-            print(f"Error scanning keyframe directory {kf_dir}: {e}")
-
-    # Ultimate fallback - try frame 1
-    img = safe_imread(keyframe_path(vid, 1))
-    if img and img.size[0] > 100:
-        return img, 1
-
-    # Final fallback - return placeholder
-    return Image.fromarray(np.full((360, 640, 3), 200, dtype=np.uint8)), 1
-
-def list_videos_from_dirs(clip_dirs: List[str],
-                          limit: Optional[int] = None,
-                          include_series: Optional[set] = None,
-                          exclude_series: Optional[set] = None,
-                          include_regex: Optional[str] = None,
-                          exclude_regex: Optional[str] = None,
-                          include_ids: Optional[set] = None,
-                          exclude_ids: Optional[set] = None) -> List[str]:
-    files = []
-    for d in clip_dirs:
-        if d and os.path.isdir(d):
-            files.extend(glob.glob(os.path.join(d, "*.npy")))
-    vids = [os.path.splitext(os.path.basename(p))[0] for p in sorted(set(files))]
-    def keep(vid: str) -> bool:
-        sid = vid.split("_", 1)[0]
-        if include_series and sid not in include_series: return False
-        if exclude_series and sid in exclude_series: return False
-        if include_ids and vid not in include_ids: return False
-        if exclude_ids and vid in exclude_ids: return False
-        if include_regex and not re.search(include_regex, vid): return False
-        if exclude_regex and re.search(exclude_regex, vid): return False
-        ds = dataset_for_video(vid)
-        if ds not in DATASETS: return False
-        return True
-    vids = [v for v in vids if keep(v)]
-    return vids[:limit] if limit else vids
-
-def load_times_for_video(video_id: str, n_feats: int) -> np.ndarray:
-    csv_path = map_csv_path_for_video(video_id)
-    if not os.path.exists(csv_path):
-        return np.linspace(0.0, float(max(n_feats - 1, 1)), num=n_feats, dtype=float)
-    df = pd.read_csv(csv_path)
-    t_all = df["pts_time"].to_numpy().astype(float)
-    keep_path = keep_idxs_path_for_video(video_id)
-    if os.path.exists(keep_path):
-        try:
-            keep = np.load(keep_path).astype(int)
-            t = t_all[np.clip(keep - 1, 0, len(t_all) - 1)]
-            if len(t) == n_feats:
-                return t
-        except Exception:
-            pass
-    if len(t_all) == n_feats:
-        return t_all
-    t_end = float(t_all[-1]) if len(t_all) else float(n_feats - 1)
-    return np.linspace(0.0, t_end, num=n_feats, dtype=float)
-
-def extract_seeds_from_query(query_vi: str) -> dict:
-    """
-    Phân tách thủ công query thành seeds khi Gemini không khả dụng.
-    Ví dụ: "câu 3 bài tập vận dụng AB" -> {"unigrams": [...], "phrases": [...]}
-    """
-    import re
-    
-    if not query_vi or not query_vi.strip():
-        return {"unigrams": [], "phrases": []}
-    
-    query = query_vi.strip().lower()
-    
-    # 1. Tách từ đơn (unigrams) - sử dụng thư viện stopwordsiso
-    try:
-        from stopwordsiso import stopwords
-        # Lấy stopwords cho tiếng Việt và tiếng Anh
-        stopwords_vi = stopwords(['vi', 'en'])
-    except ImportError:
-        # Fallback nếu không có thư viện stopwordsiso
-        stopwords_vi = {
-            'của', 'và', 'với', 'trong', 'cho', 'từ', 'đến', 'tại', 'về', 'theo',
-            'như', 'là', 'có', 'được', 'sẽ', 'đã', 'đang', 'sẽ', 'này', 'đó',
-            'các', 'những', 'một', 'hai', 'ba', 'bốn', 'năm', 'sáu', 'bảy', 'tám', 'chín', 'mười',
-            'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'
-        }
-    
-    # Tách từ bằng regex (bao gồm cả số và chữ)
-    words = re.findall(r'\b\w+\b', query)
-    unigrams = []
-    for word in words:
-        # Giữ lại số (dù chỉ 1 ký tự) và từ có >= 2 ký tự (không phải stopword)
-        if (word.isdigit() or len(word) >= 2) and word not in stopwords_vi:
-            unigrams.append(word)
-    
-    # 2. Tạo phrases từ các từ liền kề
-    phrases = []
-    words_clean = [w for w in words if (w.isdigit() or len(w) >= 2) and w not in stopwords_vi]
-    
-    # Phrases 2 từ
-    for i in range(len(words_clean) - 1):
-        phrase = f"{words_clean[i]} {words_clean[i+1]}"
-        phrases.append(phrase)
-    
-    # Phrases 3 từ (nếu có đủ từ)
-    for i in range(len(words_clean) - 2):
-        phrase = f"{words_clean[i]} {words_clean[i+1]} {words_clean[i+2]}"
-        phrases.append(phrase)
-    
-    # 3. Thêm các từ khóa đặc biệt dựa trên context
-    special_keywords = []
-    
-    # Từ khóa về số thứ tự
-    if re.search(r'\b(câu|bài|đề|số)\s*\d+\b', query):
-        special_keywords.extend(['câu', 'bài', 'đề', 'số'])
-    
-    # Từ khóa về bài tập
-    if re.search(r'\b(bài tập|bài|tập|exercise|task)\b', query):
-        special_keywords.extend(['bài tập', 'bài', 'tập'])
-    
-    # Từ khóa về vận dụng
-    if re.search(r'\b(vận dụng|ứng dụng|practice|apply)\b', query):
-        special_keywords.extend(['vận dụng', 'ứng dụng'])
-    
-    # Từ khóa về chữ cái
-    if re.search(r'\b[a-z]\b', query):
-        letters = re.findall(r'\b[a-z]\b', query)
-        special_keywords.extend(letters)
-    
-    # Thêm vào unigrams
-    for keyword in special_keywords:
-        if keyword not in unigrams:
-            unigrams.append(keyword)
-    
-    # 4. Giới hạn số lượng
-    unigrams = unigrams[:28]  # Giới hạn như Gemini
-    phrases = phrases[:18]    # Giới hạn như Gemini
-    
-    # 5. Loại bỏ trùng lặp và sắp xếp
-    unigrams = list(dict.fromkeys(unigrams))  # Giữ thứ tự, loại trùng
-    phrases = list(dict.fromkeys(phrases))    # Giữ thứ tự, loại trùng
-    
-    return {
-        "unigrams": unigrams,
-        "phrases": phrases
-    }
-
-def get_transcript_snippets_with_highlights(video_id: str, t0: float, t1: float, seeds: dict, top_n: int = 3) -> list:
-    """
-    Lấy top-N transcript snippets trong cửa sổ [t0, t1) và highlight seeds.
-    """
-    import sqlite3
-    
-    unigrams = seeds.get("unigrams", [])
-    phrases = seeds.get("phrases", [])
-    
-    # Tìm database path
-    db_path = None
-    if video_id.startswith("L"):
-        db_path = B1_DB_PATH
-    else:
-        db_path = B2_DB_PATH
-    
-    if not db_path or not os.path.exists(db_path):
-        return []
-    
-    snippets = []
-    try:
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Lấy transcript trong cửa sổ thời gian
-        cursor.execute("""
-            SELECT text, t FROM docs 
-            WHERE video_id = ? AND t BETWEEN ? AND ?
-            ORDER BY t ASC
-        """, (video_id, t0, t1))
-        
-        rows = cursor.fetchall()
-        
-        # Highlight seeds trong mỗi snippet
-        for text, timestamp in rows[:top_n]:
-            if text and text.strip():
-                highlighted_text = highlight_seeds_in_text(text, unigrams, phrases)
-                snippets.append({
-                    "text": highlighted_text,
-                    "timestamp": timestamp,
-                    "original_text": text
-                })
-        
-        cursor.close()
-        conn.close()
-        
-    except Exception as e:
-        print(f"[TRANSCRIPT-SNIPPETS] Error: {e}")
-    
-    return snippets
-
-def highlight_seeds_in_text(text: str, unigrams: list, phrases: list) -> str:
-    """
-    Highlight seeds trong text với HTML tags giống BM25 mode và thêm background highlight.
-    """
-    import re
-    
-    if not text or not unigrams and not phrases:
-        return text
-    
-    highlighted_text = text
-    
-    # Highlight phrases trước (để tránh conflict với unigrams)
-    for phrase in phrases:
-        if phrase and phrase.strip():
-            # Escape special regex characters
-            escaped_phrase = re.escape(phrase)
-            # Highlight phrase với <b> tags và background highlight
-            pattern = re.compile(f'\\b{escaped_phrase}\\b(?![^<]*</b>)', re.IGNORECASE)
-            highlighted_text = pattern.sub(r'<b style="background-color: #ffff00; padding: 2px 4px; border-radius: 3px;">\g<0></b>', highlighted_text)
-    
-    # Highlight unigrams
-    for unigram in unigrams:
-        if unigram and unigram.strip():
-            # Escape special regex characters
-            escaped_unigram = re.escape(unigram)
-            # Highlight unigram với <b> tags và background highlight
-            pattern = re.compile(f'\\b{escaped_unigram}\\b(?![^<]*</b>)', re.IGNORECASE)
-            highlighted_text = pattern.sub(r'<b style="background-color: #ffff00; padding: 2px 4px; border-radius: 3px;">\g<0></b>', highlighted_text)
-    
-    return highlighted_text
-
-def get_frame_triplet(video_id: str, mid_time: float, delta: float = 10.0) -> list:
-    """
-    Lấy 3 frame: mid-delta, mid, mid+delta
-    """
-    frames = []
-    
-    # Tính toán thời gian cho 3 frame
-    times = [mid_time - delta, mid_time, mid_time + delta]
-    
-    for time in times:
-        # Đảm bảo thời gian không âm
-        time = max(0.0, time)
-        
-        # Tìm keyframe gần nhất
-        target_keyframe = timestamp_to_keyframe_number(video_id, time)
-        keyframe_img, actual_frame = find_best_keyframe(video_id, target_keyframe)
-        
-        frames.append({
-            "image": keyframe_img,
-            "frame_number": actual_frame,
-            "timestamp": time,
-            "label": f"{time:.1f}s"
-        })
-    
-    return frames
-
-def create_fallback_enhanced_data(query_vi: str) -> dict:
-    """
-    Tạo enhanced_data thủ công khi Gemini không khả dụng.
-    """
-    seeds = extract_seeds_from_query(query_vi)
-    
-    return {
-        "aspects": [],  # Transcript Seed Search không cần aspects
-        "seeds": seeds,
-        "source": "manual_fallback",
-        "error": None
-    }
-
-def _as_int(x, default=0):
-    try:
-        if x is None:
-            return default
-        if isinstance(x, bool):
-            return int(x)
-        if isinstance(x, (int, float)):
-            return int(x)
-        s = str(x).strip()
-        if not s:
-            return default
-        # chấp nhận "10", "10.0"
-        return int(float(s))
-    except Exception:
-        return default
-
-def _as_float(x, default=0.0):
-    try:
-        if x is None:
-            return default
-        if isinstance(x, (int, float)):
-            return float(x)
-        s = str(x).strip()
-        if not s:
-            return default
-        return float(s)
-    except Exception:
-        return default
-
-# =============================== CLIP TEXT ENCODER ======================================
-_CLIP_RT = {"model": None, "tokenizer": None, "device": None, "backend": None}
-
-def ensure_clip_text_encoder(model_name='ViT-B-32', pretrained='openai'):
-    if _CLIP_RT["model"] is not None:
-        return
-    try:
-        import open_clip, torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model, _, _ = open_clip.create_model_and_transforms(model_name, pretrained=pretrained)
-        tokenizer = open_clip.get_tokenizer(model_name)
-        model.to(device); model.eval()
-        _CLIP_RT.update({"model": model, "tokenizer": tokenizer, "device": device, "backend": "open_clip"});
-        return
-    except Exception:
-        pass
-    try:
-        import clip, torch
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model, _ = clip.load(model_name, device=device, jit=False)
-        _CLIP_RT.update({"model": model, "tokenizer": clip.tokenize, "device": device, "backend": "clip"});
-        return
-    except Exception:
-        raise RuntimeError("CLIP text encoder (open_clip/clip) not found.")
-
-def encode_text(texts: List[str]) -> np.ndarray:
-    ensure_clip_text_encoder()
-    import torch
-    toks = _CLIP_RT["tokenizer"](texts)
-    with torch.no_grad():
-        toks = toks.to(_CLIP_RT["device"])
-        feats = _CLIP_RT["model"].encode_text(toks)
-        feats = feats / feats.norm(dim=-1, keepdim=True)
-    return feats.detach().cpu().numpy().astype("float32")
-
-# =============================== ASPECTS + SEEDS (Gemini) ================================
-FALLBACK = {
-    "aspects": [
-        {"name": "grand sand sculpture", "prompts": [
-            "grand sand sculpture at sand sculpture festival, monumental sand art, detailed figures",
-            "large sand sculpture exhibit, festival display, intricate sand carving"
-        ], "weight": 1.0},
-        {"name": "rollerblader + two skateboarders", "prompts": [
-            "youth street sports in sand sculpture: one rollerblader and two skateboarders",
-            "skaters carved in sand: inline skates and two skateboards"
-        ], "weight": 1.35},
-        {"name": "arched backdrop with carved letters", "prompts": [
-            "large arched backdrop with carved letters, inscriptions in sand",
-            "curved arch structure with text engraved"
-        ], "weight": 0.9},
-        {"name": "multiple sand artworks", "prompts": [
-            "multiple sand sculptures on display, exhibition with several sand artworks",
-            "variety of sand art pieces shown together at festival"
-        ], "weight": 0.8},
-        {"name": "two pink smoke columns", "prompts": [
-            "two pink smoke columns, pink smoke flares near sand sculptures",
-            "pink colored smoke pillars beside sand sculpture"
-        ], "weight": 1.35}
-    ],
-    "seeds": {
-        "unigrams": ["điêu","khắc","cát","lễ","hội","tác","phẩm","trượt","patin","ván","skate","skateboard",
-                      "vòm","cong","chữ","khói","hồng","cột","màu","thanh","niên"],
-        "phrases":  ["điêu khắc cát","lễ hội điêu khắc","tác phẩm điêu khắc","trượt patin","trượt ván",
-                      "vòm cong","khắc chữ","khói hồng","khói màu hồng","cột khói"]
-    }
-}
-
-def extract_aspects_and_seeds_with_gemini(query_vi: str, temperature: float = 0.7, top_p: float = 0.9,
-                                         model: str = "gemini-2.5-flash", max_aspects: str = "N") -> Dict:
-    if not (USE_LLM_ASPECTS and GEMINI_API_KEY):
-        print("[Gemini] Using FALLBACK aspects/seeds (no API key)")
-        return {"aspects": FALLBACK.get("aspects", []), "seeds": FALLBACK.get("seeds", {}), "source": "fallback", "error": "no_api_key"}
-    sys_inst = (
-        "You are a query builder for VIDEO RETRIEVAL / TRANSCRIPT SEARCH.\n\n"
-        "**NOTE**"
-        "- Avoid symbols like \"/\", \"\\\",... anywhere in the JSON output; they often trigger FST parsing errors."
-        "TASK\n"
-        "- INPUT: a NATURAL description (Vietnamese or English) of the target video content.\n"
-        "- OUTPUT: a single VALID JSON object with two fields: \"aspects\" and \"seeds\".\n"
-        "- Do NOT add explanations, comments, or Markdown in the output JSON.\n\n"
-        "OUTPUT CONSTRAINTS\n"
-        f"- JSON must use standard double quotes (\").\n"
-        f"- \"aspects\": an array with at most {max_aspects} items. Each item is:\n"
-        "  {\n"
-        "    \"name\": \"<aspect name in VIETNAMESE, short, strongly discriminative>\",\n"
-        "    \"prompts\": [\"<2–4 prompts in ENGLISH describing visuals/scene/action>\", ...],\n"
-        "    \"weight\": <float 0.80–1.30, 2 decimals, reflecting DIAGNOSTIC STRENGTH>\n"
-        "  }\n"
-        "- \"seeds\": {\n"
-        "    \"unigrams\": [≤ 28 VIETNAMESE single-word keywords, no common stopwords, prioritize distinctive terms],\n"
-        "    \"phrases\":  [≤ 18 VIETNAMESE phrases (2–5 words), semantically rich/distinctive]\n"
-        "  }\n"
-        "- Do not exceed count limits. No academic/theoretical wording. Do not mix languages against the rules:\n"
-        "  • aspects.name = VI | aspects.prompts = EN  \n"
-        "  • seeds.* = VI\n"
-        "- Deduplicate, normalize whitespace, keep numbers/units if highly distinctive (e.g., \"211kg\").\n"
-        "- Prioritize distinctive features: entities, objects, colors, actions, context, props, icons, rare numbers.\n"
-        "- Weights: 1.00 = neutral. >1.15 for highly diagnostic (unique/rare). 0.90–0.99 for auxiliary/uncertain. Never below 0.80 or above 1.30.\n\n"
-        "SUMMARY STRATEGY\n"
-        "1) Split the scene into 4–7 independent aspects; for each, write 2–4 EN prompts that clearly describe visuals (usable for BM25/CLIP).\n"
-        "2) Seeds (VI):\n"
-        "   - unigrams: nouns/subjects/colors/events/props (avoid function words); prefer highly discriminative terms.\n"
-        "   - phrases: combine 2–5 words into distinctive expressions (e.g., \"người phụ nữ cầm sen\", \"treo trên xe cẩu\").\n"
-        "3) Do not invent details beyond the description. If ambiguous, choose safe options; still output fully structured JSON.\n\n"
-        "FEW-SHOT FORMAT (reference)\n"
-        "- Each example has \"INPUT:\" and \"OUTPUT:\". Learn the structure and level of detail from them.\n"
-        "- For a new description, output ONLY the JSON as in \"OUTPUT\" (do not print \"INPUT/OUTPUT\").\n\n"
-        "PROCESS FOR NEW INPUTS\n"
-        "1) Decompose the description into aspects (subjects, actions, context, colors, props, numbers).\n"
-        "2) Create 2–4 EN prompts per aspect, clear and useful for CLIP/Caption retrieval.\n"
-        "3) Generate VI seeds:\n"
-        "   - unigrams: distinctive nouns/terms; keep numbers/units (e.g., \"211kg\"); avoid function words.\n"
-        "   - phrases: 2–5 words; informative combinations (subject + action + context/color/prop).\n"
-        "4) Set weight 0.80–1.30 by diagnostic strength/confidence.\n"
-        "5) Output ONE VALID JSON, with nothing else.\n"
-    )
-    payload = {"query_vi": query_vi}
-    try:
-        from google import genai
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        try:
-            resp = client.responses.generate(
-            model=GEMINI_MODEL,
-                input=json.dumps(payload, ensure_ascii=False),
-                system_instruction=sys_inst,
-                config={"max_output_tokens": GEMINI_MAX_TOKENS,
-                        "response_mime_type": "application/json"}
-            )
-            txt = getattr(resp, "output_text", None)
-            if not txt:
-                raise RuntimeError("Empty output_text")
-        except Exception:
-            cfg = genai.types.GenerateContentConfig(
-                max_output_tokens=GEMINI_MAX_TOKENS,
-                response_mime_type="application/json",
-                system_instruction=sys_inst,
-                temperature=temperature,
-                top_p=top_p
-            )
-            resp = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=json.dumps(payload, ensure_ascii=False),
-                config=cfg
-        )
-            txt = getattr(resp, "text", None) or getattr(resp, "output_text", None)
-        if not txt:
-                raise RuntimeError("Empty text")
-        data = json.loads(txt)
-        if "aspects" not in data or not isinstance(data["aspects"], list):
-            raise ValueError("no aspects")
-        if "seeds" not in data or not isinstance(data["seeds"], dict):
-            data["seeds"] = {"unigrams": [], "phrases": []}
-        data["source"] = "gemini"
-        return data
-    except Exception as e:
-        print(f"[Gemini] Call failed: {e}")
-        print("[Gemini] Using fallback translation method...")
-        aspects, seeds = fallback_translate_and_create_aspects(query_vi)
-        return {"aspects": aspects, "seeds": seeds, "source": "fallback", "error": str(e)}
-
-# =============================== BUILD QUERY VECTORS ====================================
-
-def build_query_vecs_for_aspects(aspects: List[Dict]) -> Tuple[List[np.ndarray], List[str], List[float]]:
-    all_prompts, ranges, names, weights = [], [], [], []
-    for a in aspects:
-        ps = list(dict.fromkeys(a.get("prompts", [])))
-        s = len(all_prompts)
-        all_prompts.extend(ps)
-        ranges.append((s, len(all_prompts)))
-        names.append(a.get("name", "aspect"))
-        weights.append(float(a.get("weight", 1.0)))
-    if not all_prompts:
-        all_prompts = ["generic scene"]; ranges = [(0, 1)]; names = ["generic"]; weights = [1.0]
-    q = encode_text(all_prompts).astype("float32")
-    q = l2_normalize_rows(q)
-    q_per_aspect = [q[s:e] for (s, e) in ranges]
-    return q_per_aspect, names, weights
-
-# =============================== WINDOW SCORING (CLIP) ==================================
-
-def best_window_multi_aspect(feats: np.ndarray, times: np.ndarray,
-                             q_per_aspect: List[np.ndarray],
-                             aspect_weights: List[float],
-                             window_sec: float = 40.0,
-                             min_start_sec: float = 0.0):
-    N = feats.shape[0]
-    if N == 0:
-        return {"score": -1e9, "i0": 0, "i1": 0, "t0": 0.0, "t1": 0.0,
-                "aspect_frames": [1] * len(q_per_aspect), "aspect_scores": [0.0] * len(q_per_aspect)}
-    start_idx = int(np.searchsorted(times, min_start_sec, side="left"))
-    start_idx = min(max(start_idx, 0), N - 1)
-    feats = feats[start_idx:]; times = times[start_idx:]; Nsub = feats.shape[0]
-    sims_list = []
-    for qA in q_per_aspect:
-        sims = (qA @ feats.T) if len(qA) > 0 else np.zeros((1, Nsub), dtype="float32")
-        sims_list.append(sims.max(axis=0).astype("float32"))
-    deques = [deque() for _ in range(len(sims_list))]
-    best = {"score": -1e9, "i0": 0, "i1": 0, "peaks": [(0, 0.0)] * len(sims_list)}
-    e = 0
-    for i in range(Nsub):
-        while e < Nsub and (times[e] - times[i] <= window_sec):
-            for j, s in enumerate(sims_list):
-                dq = deques[j]; val = float(s[e])
-                while dq and dq[-1][1] <= val:
-                    dq.pop()
-                dq.append((e, val))
-            e += 1
-        win_sum, peaks = 0.0, []
-        for j, dq in enumerate(deques):
-            idx, val = (dq[0] if dq else (i, float("-inf")))
-            peaks.append((idx, val)); win_sum += float(aspect_weights[j]) * val
-        if win_sum > best["score"]:
-            best = {"score": win_sum, "i0": i, "i1": e - 1, "peaks": peaks}
-        for dq in deques:
-            if dq and dq[0][0] == i:
-                dq.popleft()
-    aspect_frames = [int(start_idx + idx + 1) for (idx, _v) in best["peaks"]]
-    aspect_scores = [float(_v) for (_idx, _v) in best["peaks"]]
-    i0, i1 = best["i0"], best["i1"]
-    t0 = float(times[i0]); t1 = float(times[min(i1, len(times) - 1)])
-    return {"score": float(best["score"]),
-            "i0": int(start_idx + i0), "i1": int(start_idx + i1),
-            "t0": t0, "t1": t1,
-            "aspect_frames": aspect_frames, "aspect_scores": aspect_scores}
-
-def score_video_clip_window(video_id: str,
-                            q_per_aspect: List[np.ndarray],
-                            aspect_weights: List[float],
-                            window_sec=40.0, min_start_sec=0.0):
-    npy_path = npy_path_for_video(video_id)
-    if not os.path.exists(npy_path):
-        return {"video_id": video_id, "ok": False, "error": "no npy"}
-    feats = np.load(npy_path).astype("float32")
-    feats = l2_normalize_rows(feats)
-    times = load_times_for_video(video_id, len(feats))
-    win = best_window_multi_aspect(feats, times, q_per_aspect, aspect_weights,
-                                   window_sec=window_sec, min_start_sec=min_start_sec)
-    return {"video_id": video_id, "ok": True, "total": win["score"], "win": win}
-
-def rank_videos_clip_window(aspects: List[Dict],
-                            limit_videos=None, window_sec=40.0, min_start_sec=0.0,
-                            include_series: set | None = None,
-                            exclude_series: set | None = None,
-                            include_regex: str | None = None,
-                            exclude_regex: str | None = None,
-                            include_ids: set | None = None,
-                            exclude_ids: set | None = None):
+@st.cache_data
+def cached_list_videos():
+    """Cache the list of videos from both batches"""
     clip_dirs = []
-    if "b1" in DATASETS: clip_dirs.append(B1["clip_dir"])
-    if "b2" in DATASETS: clip_dirs.append(B2["clip_dir"])
+    if "b1" in settings.DATASETS:
+        clip_dirs.append(settings.B1["clip_dir"])
+    if "b2" in settings.DATASETS:
+        clip_dirs.append(settings.B2["clip_dir"])
+
     vids = list_videos_from_dirs(
         clip_dirs,
-        limit=limit_videos,
-        include_series=include_series, exclude_series=exclude_series,
-        include_regex=include_regex, exclude_regex=exclude_regex,
-        include_ids=include_ids, exclude_ids=exclude_ids
+        limit_videos=settings.LIMIT_VIDEOS,
+        exclude_ser=settings.EXCLUDE_SER
     )
-    print(f"[CLIP-RANK] Found {len(vids)} videos to score from datasets: {DATASETS}")
-    q_per_aspect, names, weights = build_query_vecs_for_aspects(aspects)
-    out = []
-    scored_count = 0
-    for vid in vids:
-        r = score_video_clip_window(vid, q_per_aspect, weights, window_sec=window_sec, min_start_sec=min_start_sec)
-        scored_count += 1
-        if r["ok"]:
-            out.append(r)
-    print(f"[CLIP-RANK] Successfully scored {scored_count} videos, {len(out)} returned valid results")
-    out.sort(key=lambda x: x["total"], reverse=True)
-    return out, names, weights
+    logger.info(f"Loaded {len(vids)} videos from cache")
+    return vids
 
-# ============================== TEXT RERANK (ULTRA-WIN) =================================
 
-def _tok_vi(s):
-    return re.findall(r"[0-9]+|[A-Za-zÀ-ỹĐđ]+", s.lower())
+# ============================ CLIP SEARCH FUNCTIONS ============================
 
-def build_keyword_sets(query_vi: str, seeds: Dict, max_unigrams=28, max_phrases=18):
-    toks = _tok_vi(query_vi)
-    unigrams = {t for t in toks if len(t) >= 2}
-    phrases = {" ".join(toks[i:i + 2]) for i in range(len(toks) - 1)}
-    unigrams.update(seeds.get("unigrams", []))
-    phrases.update(seeds.get("phrases", []))
-    uni = sorted(list(unigrams))[:max_unigrams]
-    phr = sorted(list(phrases))[:max_phrases]
-    q_any = " OR ".join(uni + [f'"{p}"' for p in phr]) if (uni or phr) else None
-    q_phr = " OR ".join([f'"{p}"' for p in phr]) if phr else None
-    return uni, phr, q_any, q_phr
-
-def build_bm25_query_from_seeds(query_vi: str, seeds: dict) -> str:
+def multi_query_search(query_texts: List[str], weight_list: List[float], skip_sec: float,
+                      window_sec: float, top_k: int, video_filter_list: Optional[List[str]] = None):
     """
-    Gom unigrams + phrases (từ build_keyword_sets) thành một chuỗi MATCH duy nhất.
-    Ưu tiên phrase trước; nếu có cả hai thì OR lại.
+    Multi-query CLIP search with weighted aspect queries.
+
+    Args:
+        query_texts: List of text queries (aspects)
+        weight_list: Weight for each query
+        skip_sec: Seconds to skip at the beginning
+        window_sec: Time window size
+        top_k: Number of top results to return
+        video_filter_list: Optional list of videos to filter
+
+    Returns:
+        List of search results with aggregated scores
     """
-    uni, phr, q_any, q_phr = build_keyword_sets(query_vi, seeds, max_unigrams=28, max_phrases=18)
-    if q_phr and q_any:
-        return f"({q_phr}) OR ({q_any})"
-    return q_phr or q_any or ""
+    ensure_clip_text_encoder()
 
-def _connect_ro(db_path: str):
-    return sqlite3.connect(db_path, check_same_thread=False)
+    # Encode all queries at once
+    query_embeds = clip_encode_text(query_texts)
+    query_embeds = l2_normalize_rows(query_embeds)
 
-def _count_one(db_path: str, vid: str, t0: float, t1: float, q_any: str | None, q_phr: str | None):
-    conn = _connect_ro(db_path)
-    cur = conn.cursor()
-    sql = "SELECT COUNT(*) FROM docs WHERE video_id=? AND t BETWEEN ? AND ? AND docs MATCH ?"
-    h_any = h_phr = 0
-    if q_any:
-        h_any = cur.execute(sql, (vid, t0, t1, q_any)).fetchone()[0]
-    if q_phr:
-        h_phr = cur.execute(sql, (vid, t0, t1, q_phr)).fetchone()[0]
-    conn.close()
-    return (vid, int(h_any), int(h_phr))
-
-def _alias_windows_and_dbpaths(windows):
-    g = {"b1": [], "b2": []}
-    for w in windows:
-        (g["b1"] if w["video_id"].startswith("L") else g["b2"]).append(w)
-    out = []
-    if g["b1"] and os.path.exists(B1_DB_PATH): out.append(("b1", B1_DB_PATH, g["b1"]))
-    if g["b2"] and os.path.exists(B2_DB_PATH): out.append(("b2", B2_DB_PATH, g["b2"]))
-    return out
-
-def highlight_keywords_in_text(text: str, query: str) -> str:
-    """Highlight keywords from BM25 query in the text"""
-    import re
-
-    # Type checking and conversion
-    if not isinstance(text, str):
-        text = str(text) if text is not None else ""
-    if not isinstance(query, str):
-        query = str(query) if query is not None else ""
-
-    # If either is empty, return original text
-    if not text or not query:
-        return text
-
-    try:
-        # Get keywords from the original query (before conversion)
-
-        # First, extract quoted phrases (e.g., "công an")
-        quoted_phrases = re.findall(r'"([^"]+)"', query)
-        quoted_phrases = [phrase.strip() for phrase in quoted_phrases if phrase.strip()]
-
-        # Remove quoted phrases from query for further processing
-        query_without_quotes = re.sub(r'"[^"]*"', '', query)
-
-        # Split by operators and clean up - keep single characters and numbers
-        keywords = re.split(r'\s*(?:AND|OR|NOT|\(|\))\s*', query_without_quotes)
-        keywords = [k.strip() for k in keywords if k.strip()]
-
-        # Also split by spaces and punctuation for individual words
-        words = re.findall(r'\b\w+\b', query_without_quotes.lower())
-
-        # Add numbers specifically (including single digits)
-        numbers = re.findall(r'\b\d+\b', query_without_quotes)
-
-        # Combine all keywords
-        all_keywords = quoted_phrases + keywords + words + numbers
-
-        # Remove duplicates while preserving order
-        all_keywords = list(dict.fromkeys(all_keywords))
-
-        # Allow all non-empty keywords
-        all_keywords = [k for k in all_keywords if k.strip()]
-
-        # Remove duplicates and sort by length (longest first) to avoid partial matches
-        all_keywords = list(dict.fromkeys(all_keywords))  # Remove duplicates while preserving order
-        all_keywords.sort(key=len, reverse=True)
-
-        # Create highlighted text
-        highlighted_text = text
-
-        for keyword in all_keywords:
-            # Create pattern based on keyword type
-            if keyword.isdigit():
-                # For numbers, use word boundaries but allow more flexible matching
-                pattern = re.compile(r'(?<![a-zA-Z])' + re.escape(keyword) + r'(?![a-zA-Z])(?![^<]*</b>)', re.IGNORECASE)
-            elif ' ' in keyword:
-                # For phrases, match the exact sequence with word boundaries
-                # Split the phrase and create a pattern that allows flexible whitespace
-                words = keyword.split()
-                if len(words) > 1:
-                    # Create pattern with flexible whitespace between words
-                    pattern_parts = [re.escape(word) for word in words]
-                    flexible_pattern = r'\s+'.join(pattern_parts)
-                    pattern = re.compile(r'\b' + flexible_pattern + r'\b(?![^<]*</b>)', re.IGNORECASE)
-                else:
-                    # Single word with space (shouldn't happen, but handle it)
-                    pattern = re.compile(r'\b' + re.escape(keyword) + r'\b(?![^<]*</b>)', re.IGNORECASE)
-            else:
-                # For single words, use word boundaries
-                pattern = re.compile(r'\b' + re.escape(keyword) + r'\b(?![^<]*</b>)', re.IGNORECASE)
-
-            # Replace all occurrences, preserving original case
-            def replace_func(match):
-                matched_text = match.group(0)
-                return f'<b>{matched_text}</b>'
-
-            highlighted_text = pattern.sub(replace_func, highlighted_text)
-
-        return highlighted_text
-
-    except Exception as e:
-        print(f"[HIGHLIGHT] Error highlighting text: {e}")
-        return text  # Return original text if highlighting fails
-
-def convert_bm25_syntax(query: str) -> str:
-    """Convert user-friendly BM25 syntax to SQLite FTS5 syntax"""
-    import re
-
-    # Replace operators
-    # & -> AND
-    query = re.sub(r'\s*&\s*', ' AND ', query)
-    # | -> OR
-    query = re.sub(r'\s*\|\s*', ' OR ', query)
-    # - -> NOT (but need to be careful with positioning)
-    query = re.sub(r'\s*-\s*', ' NOT ', query)
-
-    # Handle phrases in quotes - keep as is
-    # SQLite FTS5 supports "phrase search" directly
-
-    # Clean up extra spaces
-    query = re.sub(r'\s+', ' ', query).strip()
-
-    return query
-
-def load_keyframes_data():
-    """Load keyframes data from parquet files for duplicate filtering"""
-    keyframes_data = {}
-
-    try:
-        import pandas as pd
-
-        # Load b1 keyframes keepers
-        b1_path = f"{DATA_ROOT}b1/keyframes_keepers.parquet"
-        if os.path.exists(b1_path):
-            try:
-                df_b1 = pd.read_parquet(b1_path)
-                # Ensure column names are strings
-                df_b1.columns = df_b1.columns.astype(str)
-                keyframes_data['b1'] = df_b1
-                print(f"[PARQUET] Loaded {len(df_b1)} keyframes for B1")
-            except Exception as e:
-                print(f"[PARQUET] Error loading B1 keyframes: {e}")
-
-        # Load b2 manifest dedup
-        b2_path = f"{DATA_ROOT}b2/manifest_dedup.parquet"
-        if os.path.exists(b2_path):
-            try:
-                df_b2 = pd.read_parquet(b2_path)
-                # Ensure column names are strings
-                df_b2.columns = df_b2.columns.astype(str)
-                # Filter only canonical keyframes (not duplicates)
-                if 'is_canonical' in df_b2.columns:
-                    df_b2_canonical = df_b2[df_b2['is_canonical'] == True]
-                else:
-                    df_b2_canonical = df_b2
-                keyframes_data['b2'] = df_b2_canonical
-                print(f"[PARQUET] Loaded {len(df_b2_canonical)} canonical keyframes for B2")
-            except Exception as e:
-                print(f"[PARQUET] Error loading B2 manifest: {e}")
-
-        # Also load duplicates for reference
-        dup_path = f"{DATA_ROOT}b1/duplicates.parquet"
-        if os.path.exists(dup_path):
-            try:
-                df_dup = pd.read_parquet(dup_path)
-                df_dup.columns = df_dup.columns.astype(str)
-                print(f"[PARQUET] Loaded {len(df_dup)} duplicate records")
-            except Exception as e:
-                print(f"[PARQUET] Error loading duplicates: {e}")
-
-        phash_path = f"{DATA_ROOT}b1/phash.parquet"
-        if os.path.exists(phash_path):
-            try:
-                df_phash = pd.read_parquet(phash_path)
-                df_phash.columns = df_phash.columns.astype(str)
-                print(f"[PARQUET] Loaded {len(df_phash)} perceptual hash records")
-            except Exception as e:
-                print(f"[PARQUET] Error loading phash: {e}")
-
-    except Exception as e:
-        print(f"[PARQUET] Error loading parquet data: {e}")
-
-    return keyframes_data
-
-# Global variable to cache keyframes data
-_KEYFRAMES_CACHE = None
-
-def get_keyframes_data():
-    """Get cached keyframes data"""
-    global _KEYFRAMES_CACHE
-    if _KEYFRAMES_CACHE is None:
-        _KEYFRAMES_CACHE = load_keyframes_data()
-    return _KEYFRAMES_CACHE
-
-def apply_search_filters(results, exclude_series_list=None, exclude_videos_list=None):
-    """Apply filters to search results (both BM25 and CLIP)"""
-    if not exclude_series_list and not exclude_videos_list:
-        return results
-
-    filtered_results = []
-
-    for result in results:
-        video_id = result["video_id"]
-
-        # Check series exclusion
-        if exclude_series_list:
-            series_id = video_id.split('_')[0]  # Extract series (e.g., L01 from L01V001)
-            if series_id in exclude_series_list:
-                print(f"[FILTER] Excluded {video_id} (series {series_id})")
-                continue
-
-        # Check video exclusion
-        if exclude_videos_list and video_id in exclude_videos_list:
-            print(f"[FILTER] Excluded {video_id} (specific video)")
-            continue
-
-        # Keep the result if it passes all filters
-        filtered_results.append(result)
-
-    print(f"[FILTER] Filtered {len(results)} -> {len(filtered_results)} results")
-    return filtered_results
-
-def deduplicate_bm25_results(results, time_threshold=30.0):
-    """Remove duplicate results that are too close in time from the same video"""
-    if not results:
-        return results
-
-    # Group by video_id
-    video_groups = {}
-    for result in results:
-        video_id = result["video_id"]
-        if video_id not in video_groups:
-            video_groups[video_id] = []
-        video_groups[video_id].append(result)
-
-    deduplicated = []
-
-    for video_id, video_results in video_groups.items():
-        if len(video_results) <= 1:
-            # Only one result for this video, keep it
-            deduplicated.extend(video_results)
-            continue
-
-        # Sort by score (best first) and timestamp
-        video_results.sort(key=lambda x: (x["score"], x["timestamp"]))
-
-        # Keep the best result and filter others by time threshold
-        selected_results = [video_results[0]]  # Always keep the best result
-
-        for result in video_results[1:]:
-            # Check if this result is far enough from all selected results
-            too_close = False
-            for selected in selected_results:
-                time_diff = abs(result["timestamp"] - selected["timestamp"])
-                if time_diff < time_threshold:  # Within threshold (default 30 seconds)
-                    too_close = True
-                    break
-
-            if not too_close:
-                selected_results.append(result)
-
-        deduplicated.extend(selected_results)
-        print(f"[DEDUPE] Video {video_id}: {len(video_results)} -> {len(selected_results)} results")
-
-    # Sort final results by score
-    deduplicated.sort(key=lambda x: x["score"])
-
-    print(f"[DEDUPE] Total deduplicated: {len(results)} -> {len(deduplicated)} results")
-    return deduplicated
-
-def bm25_search_videos(query: str, limit: int = 50):
-    """Search videos using BM25 full-text search"""
-    import sqlite3
-
-    # Validate query
-    if not query or not query.strip():
-        print("[BM25] Empty query provided")
-        return []
-
-    # Convert user-friendly syntax to SQLite FTS5 syntax
-    converted_query = convert_bm25_syntax(query.strip())
-    print(f"[BM25] Original query: '{query}'")
-    print(f"[BM25] Converted query: '{converted_query}'")
-
-    # Check if converted query is valid
-    if not converted_query or not converted_query.strip():
-        print("[BM25] Converted query is empty")
-        return []
+    # Get video list
+    vids = cached_list_videos()
+    if video_filter_list:
+        vids = [v for v in vids if v in video_filter_list]
 
     results = []
 
-    # Store original query for highlighting
-    original_query = query
-
-    # Search both databases
-    for db_name, db_path in [("b1", B1_DB_PATH), ("b2", B2_DB_PATH)]:
-        if not os.path.exists(db_path):
-            print(f"[BM25] Database not found: {db_path}")
-            continue
-
-        conn = None
-        cur = None
+    for vid in vids:
         try:
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
+            # Load video features
+            data = load_video_features(vid)
+            if data is None:
+                continue
 
-            # BM25 search query - get full text from text column
-            # Note: In FTS5, both snippet() and bm25() use table name, not column name
-            sql = """
-            SELECT video_id,
-                   snippet(docs, 2, '<b>', '</b>', '...', 50) as snippet,
-                   text as full_text,
-                   bm25(docs) as score,
-                   t as timestamp
-            FROM docs
-            WHERE text MATCH ?
-            ORDER BY bm25(docs) DESC
-            LIMIT ?
-            """
+            feats, times = data
+            feats = l2_normalize_rows(feats)
 
-            print(f"[BM25] Executing query for {db_name}: {converted_query}")
-            cur.execute(sql, (converted_query, limit))
-            rows = cur.fetchall()
+            # Skip initial frames
+            if skip_sec > 0:
+                mask = times >= skip_sec
+                feats = feats[mask]
+                times = times[mask]
 
-            print(f"[BM25] Found {len(rows)} results in {db_name}")
+            if len(feats) == 0:
+                continue
 
-            for row in rows:
-                video_id, snippet, full_text, score, timestamp = row
+            # Compute similarities for all aspects
+            all_sims = []
+            for q_embed in query_embeds:
+                sim = compute_similarity(
+                    q_embed.reshape(1, -1),
+                    feats,
+                    normalize=False
+                ).flatten()
+                all_sims.append(sim)
 
-                # Ensure all values are strings (SQLite might return integers for some fields)
-                video_id = str(video_id) if video_id is not None else ""
-                snippet = str(snippet) if snippet is not None else ""
-                full_text = str(full_text) if full_text is not None else ""
-                timestamp = float(timestamp) if timestamp is not None else 0.0
+            # Aggregate similarities with weights
+            total_sim = np.zeros(len(feats))
+            for sim, weight in zip(all_sims, weight_list):
+                total_sim += sim * weight
 
-                # Highlight keywords in full text
-                try:
-                    highlighted_full_text = highlight_keywords_in_text(full_text, original_query)
-                except Exception as e:
-                    print(f"[BM25] Error highlighting text for {video_id}: {e}")
-                    highlighted_full_text = full_text  # Use original text if highlighting fails
+            # Find best windows
+            if window_sec > 0:
+                # Window-based scoring
+                for i in range(len(feats)):
+                    t_start = times[i]
+                    t_end = t_start + window_sec
+                    mask = (times >= t_start) & (times <= t_end)
+                    window_scores = total_sim[mask]
 
-                results.append({
-                    "video_id": video_id,
-                    "snippet": snippet,
-                    "full_text": full_text,
-                    "highlighted_full_text": highlighted_full_text,
-                    "score": float(score) if score is not None else 0.0,
-                    "timestamp": timestamp,
-                    "db_source": db_name
-                })
+                    if len(window_scores) > 0:
+                        score = float(np.mean(window_scores))
+                        best_idx = i + np.argmax(window_scores)
+
+                        results.append({
+                            'video_id': vid,
+                            'frame_id': int(best_idx),
+                            'timestamp': float(times[i]),
+                            'score': score,
+                            'window_start': float(t_start),
+                            'window_end': float(t_end)
+                        })
+            else:
+                # Frame-level scoring
+                for i in range(len(feats)):
+                    results.append({
+                        'video_id': vid,
+                        'frame_id': i,
+                        'timestamp': float(times[i]),
+                        'score': float(total_sim[i])
+                    })
 
         except Exception as e:
-            print(f"[BM25] Error searching {db_name}: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            # Ensure connections are properly closed
-            try:
-                if cur:
-                    cur.close()
-            except Exception as e:
-                print(f"[BM25] Error closing cursor for {db_name}: {e}")
-            try:
-                if conn:
-                    conn.close()
-            except Exception as e:
-                print(f"[BM25] Error closing connection for {db_name}: {e}")
+            logger.error(f"Error processing video {vid}: {e}")
+            continue
 
-    # Sort by score and return top results
-    results.sort(key=lambda x: x["score"], reverse=True)
-    return results[:limit]
+    # Sort by score and return top-k
+    results.sort(key=lambda x: x['score'], reverse=True)
+    return results[:top_k]
+
+
+# ============================ RERANK FUNCTIONS ============================
+
+def build_keyword_sets(seeds: Dict, max_unigrams: int = 16, max_phrases: int = 10,
+                       phrases_only: bool = False):
+    """Build keyword sets from seeds for BM25 queries"""
+    unigrams = seeds.get("unigrams", [])[:max_unigrams] if not phrases_only else []
+    phrases = seeds.get("phrases", [])[:max_phrases]
+
+    q_any_parts = list(unigrams) if unigrams else []
+    q_phr_parts = [f'"{p}"' for p in phrases] if phrases else []
+
+    q_any = " OR ".join(q_any_parts) if q_any_parts else ""
+    q_phr = " OR ".join(q_phr_parts) if q_phr_parts else ""
+
+    return (q_any, q_phr)
+
 
 def rerank_with_transcript_ultra_window(
-    clip_results: list,
+    results: List[Dict],
     query_vi: str,
-    seeds: dict,
-    top_candidates: int = 60,
-    delta_sec: float = 10.0,
-    w_clip: float = 0.4, w_text: float = 0.6,
-    text_weights: dict | None = None,
-    verbose: bool = True, timing: bool = True,
-    *,
+    seeds: Dict,
+    top_candidates: int,
+    delta_sec: float,
+    w_clip: float,
+    w_text: float,
+    text_weights: Dict[str, float],
+    verbose: bool = True,
+    sort_output: bool = True,
     workers: int = 8,
     phrases_only: bool = False,
-    max_unigrams: int = 16, max_phrases: int = 10,
+    max_unigrams: int = 16,
+    max_phrases: int = 10,
     num_aspects: int = 1
 ):
-    if text_weights is None:
-        text_weights = {"any": 0.3, "phr": 0.7}
-    t0 = time.perf_counter()
-    cand = [{"video_id": r["video_id"], "clip_total": float(r["total"]),
-             "t0": max(0.0, float(r["win"]["t0"]) - float(delta_sec)),
-             "t1": float(r["win"]["t1"]) + float(delta_sec)}
-            for r in clip_results[:top_candidates]]
-    df = pd.DataFrame(cand)
-    if df.empty:
-        return df
-    uni, phr, q_any, q_phr = build_keyword_sets(
-        query_vi, seeds,
-        max_unigrams=(0 if phrases_only else max_unigrams),
-        max_phrases=max_phrases
-    )
-    # Verbose introspection of what will be used for rerank
-    if verbose:
-        seed_uni = seeds.get("unigrams", []) if isinstance(seeds, dict) else []
-        seed_phr = seeds.get("phrases", []) if isinstance(seeds, dict) else []
-        seeds_empty = (len(seed_uni) == 0 and len(seed_phr) == 0)
-        # Preview helpers
-        def _preview_list(values, limit):
-            try:
-                values = list(values)
-            except Exception:
-                values = []
-            if len(values) <= limit:
-                return values
-            return values[:limit] + ["..."]
-
-        def _trim_str(s: str | None, max_len: int = 400) -> str:
-            if s is None:
-                return "None"
-            if len(s) <= max_len:
-                return s
-            return f"{s[:max_len]}... (+{len(s) - max_len} chars)"
-
-        uni_prev = _preview_list(uni, 24)
-        phr_prev = _preview_list(phr, 16)
-        print(
-            f"[ULTRA-WIN][KEYS] seeds_empty={seeds_empty} | seed_uni={len(seed_uni)} | seed_phr={len(seed_phr)} | "
-            f"derived_uni={len(uni)} | derived_phr={len(phr)}"
-        )
-        print(f"[ULTRA-WIN][UNI] {', '.join(map(str, uni_prev))}")
-        print("[ULTRA-WIN][PHR] " + ", ".join(('"{}'.format(p) + '"') if p != "..." else "..." for p in phr_prev))
-        print(f"[ULTRA-WIN][q_any] {_trim_str(q_any)}")
-        print(f"[ULTRA-WIN][q_phr] {_trim_str(q_phr)}")
-    if phrases_only:
-        q_any = None
-    parts = []
-    for _al, db_path, wins in _alias_windows_and_dbpaths(cand):
-        rows = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-            futures = [ex.submit(_count_one, db_path, w["video_id"], float(w["t0"]), float(w["t1"]), q_any, q_phr)
-                       for w in wins]
-            for fut in concurrent.futures.as_completed(futures):
-                rows.append(fut.result())
-        parts.append(pd.DataFrame(rows, columns=["video_id", "hits_any", "hits_phr"]))
-    text_df = (pd.concat(parts, ignore_index=True)
-               if parts else pd.DataFrame(columns=["video_id", "hits_any", "hits_phr"]))
-    def _minmax(x):
-        x = x.astype(float); mn, mx = x.min(), x.max()
-        if mx - mn < 1e-9:
-            return np.ones_like(x, dtype=float)
-        return (x - mn) / (mx - mn)
-    df = df.merge(text_df, on="video_id", how="left").fillna({"hits_any": 0, "hits_phr": 0})
-    df["clip_n"] = _minmax(df["clip_total"].values / num_aspects)
-    df["any_n"] = _minmax(df["hits_any"].values)
-    df["phr_n"] = _minmax(df["hits_phr"].values)
-    a, b = text_weights["any"], text_weights["phr"]
-    df["text_score"] = a * df["any_n"] + b * df["phr_n"]
-    df["fused"] = w_clip * df["clip_n"] + w_text * df["text_score"]
-    df = df.sort_values("fused", ascending=False).reset_index(drop=True)
-    if verbose:
-        print(f"[ULTRA-WIN] fused = {w_clip}*(clip_total/{num_aspects}) + {w_text}*( {a}*hits_any + {b}*hits_phr ) | Δ={delta_sec}s | workers={workers} | phrases_only={phrases_only}")
-
-    if timing:
-        print(f"[ULTRA-WIN] elapsed: {time.perf_counter() - t0:.3f}s (candidates={len(df)})")
-    return df
-
-def reorder_results_by_df(orig_results, ranked_df, top_videos=TOP_VIDEOS):
-    order = ranked_df.head(top_videos)["video_id"].tolist()
-    vid2r = {r["video_id"]: r for r in orig_results}
-    return [vid2r[v] for v in order if v in vid2r]
-
-# ===================== Transcript Seed BM25 Search (FTS5) =====================
-
-def _vi_strip_accents(s: str) -> str:
-    return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-
-def _fts5_escape_term(term: str) -> str:
     """
-    Escape 1 token cho FTS5 MATCH. Tránh ký tự đặc biệt.
-    Ví dụ: công an -> công AND an nếu bạn tách; ở đây ta treat nguyên cụm cho đơn giản.
+    Rerank CLIP results using transcript matching with ultra window approach.
     """
-    term = term.strip()
-    # FTS5 support quotes for phrases; for single token keep as-is unless contains spaces.
-    if not term:
-        return ""
-    # Replace any double-quote in term by two double-quotes inside quoted phrase
-    if ' ' in term or '"' in term:
-        return '"' + term.replace('"', '""') + '"'
-    return term
+    if not results:
+        return pd.DataFrame(), io.StringIO()
 
-def _build_seed_fts5_query(seeds_json: dict) -> str:
-    """
-    Tạo 1 MATCH query dạng:  (u1 OR u2 OR ... OR "ph 1" OR "ph 2" ...)
-    - Ưu tiên: đơn giản, dễ tương thích tokenizer mặc định.
-    - Bạn có thể nâng cấp: thêm NEAR, AND, nhóm ưu tiên...
-    """
-    seeds = (seeds_json or {}).get("seeds", {})
-    unigrams = [w.strip().lower() for w in seeds.get("unigrams", []) if w.strip()]
-    phrases  = [p.strip().lower() for p in seeds.get("phrases", [])  if p.strip()]
+    # Take top candidates
+    top_results = results[:top_candidates]
 
-    parts = []
-    for u in unigrams:
-        parts.append(_fts5_escape_term(u))
-    for p in phrases:
-        parts.append(_fts5_escape_term(p))  # giữ nguyên ở dạng "phrase"
-    parts = [p for p in parts if p]
+    # Build BM25 queries from seeds
+    q_any, q_phr = build_keyword_sets(seeds, max_unigrams, max_phrases, phrases_only)
 
-    if not parts:
-        raise ValueError("No seeds provided (both unigrams and phrases are empty).")
+    if not q_any and not q_phr:
+        logger.warning("No valid keywords for rerank")
+        return pd.DataFrame(), io.StringIO()
 
-    return "(" + " OR ".join(parts) + ")"
+    # Prepare windows for each result
+    windows = []
+    for r in top_results:
+        vid = r['video_id']
+        t_center = r.get('timestamp', 0.0)
 
-def _run_fts5_query(db_path: str, match_query: str, limit: int = 800):
-    """
-    Trả list các row dạng dict: {doc_id, video_id, frame_id, t, text, bm25}
-    - bm25(docs) nhỏ hơn là tốt hơn (ASC).
-    """
+        # Create window around timestamp
+        t0 = max(0.0, t_center - delta_sec / 2)
+        t1 = t_center + delta_sec / 2
+
+        windows.append({
+            'video_id': vid,
+            'frame_id': r.get('frame_id', 0),
+            't0': t0,
+            't1': t1,
+            'clip_score': r.get('score', 0.0)
+        })
+
+    # Count transcript matches in parallel
+    def count_window(win):
+        vid = win['video_id']
+        dataset = dataset_for_video(vid)
+        db_path = settings.B1_DB_PATH if dataset == "b1" else settings.B2_DB_PATH
+
+        if not db_path or not os.path.exists(db_path):
+            return (vid, 0, 0)
+
+        return count_matches(db_path, vid, win['t0'], win['t1'], q_any, q_phr)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        counts = list(executor.map(count_window, windows))
+
+    # Build result dataframe
     rows = []
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    try:
-        sql = """
-            SELECT doc_id, video_id, frame_id, t, text, bm5.bm AS bm25
-            FROM (SELECT *, bm25(docs) AS bm FROM docs WHERE docs MATCH ?)
-            AS bm5
-            ORDER BY bm ASC
-            LIMIT ?;
-        """
-        limit_i = _as_int(limit, 800)
-        for r in conn.execute(sql, (str(match_query), limit_i)):
-            rows.append({
-                "doc_id":   r["doc_id"],
-                "video_id": r["video_id"],
-                "frame_id": r["frame_id"],
-                "t":        float(r["t"]),
-                "text":     r["text"] or "",
-                "bm25":     float(r["bm25"]),
+    for win, (_, h_any, h_phr) in zip(windows, counts):
+        text_score = text_weights.get('any', 0.3) * h_any + text_weights.get('phr', 0.7) * h_phr
+        clip_total = win['clip_score']
+        clip_normalized = clip_total / max(1, num_aspects)
+        fused = w_clip * clip_normalized + w_text * text_score
+
+        rows.append({
+            'video_id': win['video_id'],
+            'frame_id': win['frame_id'],
+            't0': win['t0'],
+            't1': win['t1'],
+            'clip_total': clip_total,
+            'clip_n': clip_normalized,
+            'hits_any': h_any,
+            'hits_phr': h_phr,
+            'text_score': text_score,
+            'fused': fused
+        })
+
+    df = pd.DataFrame(rows)
+
+    if sort_output and not df.empty:
+        df = df.sort_values('fused', ascending=False).reset_index(drop=True)
+
+    buf = io.StringIO()
+    buf.write(f"Reranked {len(df)} windows\n")
+    buf.write(f"Query keywords: any={len(q_any.split(' OR '))}, phrase={len(q_phr.split(' OR '))}\n")
+
+    return df, buf
+
+
+def reorder_results_by_df(clip_results: List[Dict], rerank_df: pd.DataFrame, top_videos: int = 20):
+    """Reorder CLIP results based on rerank dataframe"""
+    if rerank_df.empty:
+        return clip_results[:top_videos]
+
+    # Build lookup by video_id
+    video_scores = {}
+    for _, row in rerank_df.iterrows():
+        vid = row['video_id']
+        if vid not in video_scores or row['fused'] > video_scores[vid]['score']:
+            video_scores[vid] = {
+                'score': row['fused'],
+                'window': {
+                    't0': row['t0'],
+                    't1': row['t1'],
+                    'frame_id': row['frame_id']
+                }
+            }
+
+    # Reorder results
+    reordered = []
+    for vid, data in sorted(video_scores.items(), key=lambda x: x[1]['score'], reverse=True):
+        # Find original result
+        orig = next((r for r in clip_results if r['video_id'] == vid), None)
+        if orig:
+            reordered.append({
+                **orig,
+                'total': data['score'],
+                'win': data['window']
             })
-    finally:
-        conn.close()
-    return rows
 
-def _count_unigram_hits(text_low: str, unigrams_low: list[str]) -> int:
-    """
-    Đếm số unigram DISTINCT xuất hiện (đủ xài). Word-boundary tiếng Việt không hoàn hảo,
-    nhưng với FTS5 đã lọc ứng viên thì cách này nhanh và ổn.
-    """
-    hits = 0
-    seen = set()
-    for u in unigrams_low:
-        if not u or u in seen: 
-            continue
-        # r"\b...\b" hơi yếu với Unicode; dùng ' in text ' fallback:
-        # Ưu tiên regex, nếu không match thì thử chứa khoảng trắng/biên—đơn giản.
-        pat = r'(?<!\w)' + re.escape(u) + r'(?!\w)'
-        if re.search(pat, text_low):
-            seen.add(u)
-            hits += 1
-        else:
-            # fallback loose
-            if (" " + u + " ") in (" " + text_low + " "):
-                seen.add(u); hits += 1
-    return hits
-
-def _count_phrase_hits(text_low: str, phrases_low: list[str]) -> int:
-    cnt = 0
-    for p in phrases_low:
-        if p and p in text_low:
-            cnt += 1
-    return cnt
-
-def _window_key(t: float, window_sec: float, stride_sec: float) -> float:
-    """
-    Quy về mốc cửa sổ (start) theo stride. Ví dụ t=23, window=10, stride=5 -> 20.0
-    """
-    if stride_sec <= 0:
-        return 0.0
-    k = math.floor(t / stride_sec) * stride_sec
-    return max(0.0, k)
-
-def _resolve_bm25_dbpaths(db_batch1=None, db_batch2=None):
-    """
-    Ưu tiên: biến toàn cục B1_DB_PATH/B2_DB_PATH -> find_db_path(DATA_ROOT, 'b1'/'b2') -> fallback Windows.
-    """
-    # 1) ưu tiên đối số truyền vào
-    b1 = db_batch1 or globals().get("B1_DB_PATH")
-    b2 = db_batch2 or globals().get("B2_DB_PATH")
-
-    # 2) nếu vẫn thiếu, thử find_db_path
-    data_root = globals().get("DATA_ROOT", "")
-    if (not b1) and ("find_db_path" in globals()):
-        try:
-            b1 = find_db_path(data_root, "b1")
-        except Exception:
-            b1 = None
-    if (not b2) and ("find_db_path" in globals()):
-        try:
-            b2 = find_db_path(data_root, "b2")
-        except Exception:
-            b2 = None
-
-    # 3) fallback cuối cùng (Windows paths bạn đang dùng)
-    if not b1:
-        b1 = r"E:\HCMC-AI\b1\text_bm25.db"
-    if not b2:
-        b2 = r"E:\HCMC-AI\b2\text_bm25.db"
-
-    return b1, b2
-
-def transcript_seed_bm25_search(
-    enhanced_data: dict,
-    top_videos: int = 20,
-    window_sec: float = 10.0,
-    stride_sec: float = 5.0,
-    limit_videos: int = 600,
-    exclude_series: set | None = None,
-    db_batch1: str | None = None,
-    db_batch2: str | None = None,
-):
-    """
-    - Đọc seeds từ enhanced_data['seeds'] (VI).
-    - MATCH cả 2 DB FTS5; gom rows thành cửa sổ [w, w+window_sec).
-    - Điểm: score = uniq_unigram_hits + 2*phrase_hits (trên text gộp của cửa sổ).
-    - Với mỗi video: chọn 1 window tốt nhất.
-    - Trả: list[ {video_id, batch, t0, t1, score, bm25_best, doc_repr} ] sắp xếp theo score desc.
-    """
-    exclude_series = exclude_series or set()
-
-    top_videos  = max(1, _as_int(top_videos, 20))
-    window_sec  = max(0.1, _as_float(window_sec, 10.0))
-    stride_sec  = max(0.1, _as_float(stride_sec, 5.0))
-    limit_vids  = max(1, _as_int(limit_videos, 800))
-
-    seeds = (enhanced_data or {}).get("seeds", {})
-    unigrams = [w.strip().lower() for w in seeds.get("unigrams", []) if w.strip()]
-    phrases  = [p.strip().lower() for p in seeds.get("phrases", [])  if p.strip()]
-    if not unigrams and not phrases:
-        raise ValueError("Seeds are empty. Please Enhance the query first.")
-
-    match_query = _build_seed_fts5_query(enhanced_data)
-
-    # resolve path theo máy local
-    db_batch1, db_batch2 = _resolve_bm25_dbpaths(db_batch1, db_batch2)
-
-    # sanity check (thông báo rõ nếu thiếu file)
-    missing = []
-    if not (db_batch1 and os.path.exists(db_batch1)):
-        missing.append(("b1", db_batch1))
-    if not (db_batch2 and os.path.exists(db_batch2)):
-        missing.append(("b2", db_batch2))
-    if missing:
-        msg = " | ".join([f"{tag}: {path or '(None)'}" for tag, path in missing])
-        raise FileNotFoundError(f"BM25 DB not found -> {msg}")
-
-    # lấy ứng viên từ 2 batch
-    cand1 = _run_fts5_query(db_batch1, match_query, limit=limit_vids)
-    for r in cand1: r["_batch"] = "b1"
-    cand2 = _run_fts5_query(db_batch2, match_query, limit=limit_vids)
-    for r in cand2: r["_batch"] = "b2"
-
-    candidates = cand1 + cand2
-    if not candidates:
-        return []
-
-    # Gom theo (video_id, window_start)
-    buckets = defaultdict(list)
-    for r in candidates:
-        vid = r["video_id"]
-        if any(vid.startswith(prefix) for prefix in exclude_series):
-            continue
-        w0 = _window_key(r["t"], window_sec=window_sec, stride_sec=stride_sec)
-        buckets[(vid, w0)].append(r)
-
-    results_by_video_best = {}
-    for (vid, w0), rows in buckets.items():
-        # gộp text trong cửa sổ (chỉ rows có t ∈ [w0, w0+window_sec))
-        w1 = w0 + window_sec
-        rows_in = [x for x in rows if w0 <= x["t"] < w1]
-        if not rows_in:
-            continue
-        # gộp text để tính hit
-        merged_text = " ".join(x["text"] for x in rows_in).lower()
-        merged_text_noacc = _vi_strip_accents(merged_text)
-        # text_low = merged_text + " " + merged_text_noacc  # nếu muốn tăng recall
-        text_low = merged_text  # đơn giản trước; có thể nối thêm no-accents nếu thấy cần
-
-        uni_hits = _count_unigram_hits(text_low, unigrams)
-        phr_hits = _count_phrase_hits(text_low, phrases)
-        score = float(uni_hits + 2 * phr_hits)
-
-        # chọn 1 doc đại diện (bm25 tốt nhất) để có frame_id/t timestamp gần mid
-        rows_in_sorted = sorted(rows_in, key=lambda x: x["bm25"])
-        repr_doc = rows_in_sorted[0]
-        bm25_best = repr_doc["bm25"]
-        # chọn batch theo doc đại diện
-        batch = repr_doc.get("_batch", "?")
-
-        # pick best per video
-        cur_best = results_by_video_best.get(vid)
-        item = {
-            "video_id": vid,
-            "batch": batch,
-            "t0": w0,
-            "t1": w1,
-            "score": score,
-            "bm25_best": bm25_best,
-            "doc_repr": repr_doc,
-        }
-        if (cur_best is None) or (score > cur_best["score"]) or (
-            math.isclose(score, cur_best["score"]) and bm25_best < cur_best["bm25_best"]
-        ):
-            results_by_video_best[vid] = item
-
-    # Trả top theo score; nếu tie thì bm25_best asc
-    results = list(results_by_video_best.values())
-    results.sort(key=lambda x: (-x["score"], x["bm25_best"]))
-    return results[:top_videos]
-
-# =============================== MEDIA INFO (watch_url) ==================================
-# START: Code to be Replaced (FINAL, COMPLETE, AND FUNCTIONAL VERSION WITH 100% ORIGINAL JS)
-
-def _create_base_player_html(
-    video_id: str,
-    start_time: float,
-    fps: float,
-    video_name: str,
-    player_html: str,
-    player_js_init: str,
-    player_js_handlers: str,
-) -> str:
-    """
-    This is the main template for the video player UI.
-    It contains ALL the original HTML and JS, with placeholders for player-specific parts.
-    """
-    vid_us = re.sub(r'[^a-zA-Z0-9_]', '_', video_name)
-    start_frame = int(start_time * fps)
-    seek_max_init = max(1, start_frame + 1)
-    start_frame_plus_1 = start_frame + 1
-
-    # This template now contains the FULL and UNMODIFIED code from your original function.
-    html_template = r"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Video Player</title>
-        <<PLAYER_JS_INIT>>
-        <style>
-            /* This is the full, original CSS block */
-            html, body { height: auto !important; min-height: 100% !important; overflow-y: auto !important; }
-            body { font-family: Arial, sans-serif; margin: 10px; padding-bottom: 80px; }
-            .container, .info-panel, .video-panel { overflow: visible !important; }
-            .container { display: flex; gap: 20px; }
-            .info-panel { flex: 1; background: #2e2e2e; padding: 20px; border-radius: 8px; color: white; }
-            .video-panel { flex: 2; }
-            .time-display { font-size: 24px; color: #00ff00; margin: 10px 0; }
-            .frame-display { font-size: 20px; color: #ff6b6b; margin: 10px 0; }
-            iframe, video { width: 100%; height: 500px; display:block; background-color: #000; }
-            .status { margin: 10px 0; }
-            .top-form { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 12px 0; }
-            .form-group { display: flex; align-items: center; gap: 6px; background: #3a3a3a; padding: 6px 8px; border-radius: 6px; }
-            .form-group label { font-size: 12px; color: #ddd; white-space: nowrap; }
-            .form-group input, .form-group select { height: 30px; min-width: 110px; padding: 0 8px; border-radius: 6px; border: 1px solid #777; background:#1f1f1f; color:#fff; font-size: 13px; }
-            .price-input { width: 100%; display: flex; gap: 6px; margin: 10px 0 8px; align-items: center; }
-            .price-input .field { display: flex; width: 100%; height: 36px; align-items: center; }
-            .price-input .field span { font-size: 12px; opacity: 0.8; }
-            .price-input .field input { width: 100%; height: 100%; outline: none; font-size: 14px; margin-left: 8px; border-radius: 6px; text-align: center; border: 1px solid #777; background:#1f1f1f; color:#fff; min-width: 60px; }
-            .price-input .separator { width: 40px; display: flex; font-size: 14px; align-items: center; justify-content: center; }
-            .slider { height: 6px; position: relative; background: #444; border-radius: 6px; }
-            .slider .progress { height: 100%; left: 0%; right: 100%; position: absolute; border-radius: 6px; background: #17A2B8; }
-            .range-input { position: relative; height: 10px; }
-            .range-input input[type="range"] { position: absolute; width: 100%; height: 6px; top: -6px; background: none; pointer-events: none; -webkit-appearance: none; -moz-appearance: none; }
-            .range-input input[type="range"]::-webkit-slider-thumb { height: 16px; width: 16px; border-radius: 50%; background: #17A2B8; pointer-events: auto; -webkit-appearance: none; box-shadow: 0 0 6px rgba(0,0,0,0.25); border:2px solid #fff; }
-            .range-input input[type="range"]::-moz-range-thumb { height: 16px; width: 16px; border:none; border-radius: 50%; background: #17A2B8; pointer-events: auto; -moz-appearance: none; box-shadow: 0 0 6px rgba(0,0,0,0.25); }
-            .step-controls { display: flex; align-items: center; gap: 4px; margin-left: 8px; }
-            .step-label { font-size: 10px; color: #aaa; white-space: nowrap; }
-            .step-input { width: 35px; height: 24px; padding: 2px 4px; border: 1px solid #777; border-radius: 4px; background: #1f1f1f; color: #fff; font-size: 11px; text-align: center; }
-            .step-btn { width: 18px; height: 24px; border: 1px solid #777; background: #2a2a2a; color: #fff; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: bold; }
-            .add-btn { width: 80px; height: 32px; border: 1px solid #777; background: #0073e6; color: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }
-            .current-btn { width: 50px; height: 24px; border: 1px solid #777; background: #28a745; color: #fff; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: bold; margin-left: 5px; }
-            .preview-wrapper { margin-top: 18px; }
-            .preview-card { background:#2e2e2e; border:1px solid #444; border-radius:8px; overflow:hidden; }
-            .preview-header { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:#1f1f1f; border-bottom:1px solid #444; color:#fff; }
-            .preview-controls { display:flex; flex-direction:column; align-items:flex-end; gap:5px; }
-            .preview-hint { font-size:12px; opacity:0.7; }
-            .delete-range-controls { display:flex; align-items:center; gap:5px; font-size:12px; position: relative; }
-            .delete-range-controls input { padding:2px 4px; border:1px solid #777; border-radius:3px; background:#1f1f1f; color:#fff; font-size:11px; }
-            .delete-range-btn { padding:2px 8px; border:1px solid #dc3545; background:#dc3545; color:#fff; border-radius:3px; cursor:pointer; font-size:11px; }
-            .notification { position: absolute; top: 100%; left: 0; right: 0; background: #28a745; color: white; padding: 8px 12px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); z-index: 1000; font-size: 12px; font-weight: 500; opacity: 0; transform: translateY(-10px); transition: all 0.3s ease; margin-top: 5px; }
-            .notification.show { opacity: 1; transform: translateY(0); }
-            .notification.error { background: #dc3545; }
-            .trake-confirm-btn { padding: 6px 16px; border: 1px solid #28a745; background: #28a745; color: #fff; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold; }
-            .save-csv-btn { padding: 8px 20px; border: 1px solid #17a2b8; background: #17a2b8; color: #fff; border-radius: 4px; cursor: pointer; font-size: 13px; font-weight: bold; }
-            .trake-scene-input { margin-bottom: 8px; }
-            .trake-scene-input label { display: block; font-size: 12px; margin-bottom: 4px; color: #ccc; }
-            .trake-scene-input input { width: 200px; padding: 4px 8px; border: 1px solid #777; border-radius: 3px; background: #1f1f1f; color: #fff; font-size: 11px; }
-            .trake-scene-btn { width: 30px; height: 30px; border: 2px solid #dc3545; background: #dc3545; color: #fff; border-radius: 50%; cursor: pointer; font-size: 12px; font-weight: bold; display: flex; align-items: center; justify-content: center; transition: all 0.3s ease; }
-            .trake-scene-btn.selected { background: #28a745; border-color: #28a745; }
-            .pr-list { max-height: 220px; overflow:auto; }
-            .pr-row { display:flex; align-items:center; gap:12px; padding:8px 12px; border-bottom:1px dashed #3a3a3a; cursor:pointer; user-select:none; }
-            .pr-index { width:34px; text-align:right; color:#ddd; opacity:.6; font-size:12px; }
-            .pr-value { color:#fff; font-size:14px; }
-            .pr-row.selected { background:#3a3a3a; outline:1px solid #17A2B8; }
-            .pr-empty { color:#ccc; opacity:.7; padding:12px; font-size:13px; }
-            .sliders-container { margin-top: 20px; padding: 20px; background: #2e2e2e; border-radius: 8px; color: white; }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="video-panel">
-                <<PLAYER_HTML>>
-                <div class="sliders-container">
-                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
-                        <div id="trake-scene-number-wrap-<<vid_us>>" style="display:none;">
-                            <label style="font-size:12px; color:#ccc; margin-right:8px;">Add for:</label>
-                            <div id="trake-scene-buttons-<<vid_us>>" style="display:inline-flex; gap:5px; margin-left:8px;"></div>
-                        </div>
-                        <div style="display:flex; align-items:center; gap:8px; margin-left:auto;">
-                            <label for="goto-frame-<<vid_us>>" style="font-size:12px; color:#ccc;"><strong>Go to Frame:</strong></label>
-                            <input type="number" id="goto-frame-<<vid_us>>" placeholder="Enter frame and press Enter" style="width: 180px; height:28px; padding: 2px 6px; border-radius: 3px; border: 1px solid #777; background:#1f1f1f; color:#fff; font-size:11px;" />
-                        </div>
-                    </div>
-                    <div style="margin-top:10px;">
-                        <div style="display:flex; justify-content:space-between;">
-                            <span id="frame-left-<<vid_us>>"><strong><<start_frame>> F</strong></span>
-                            <span id="frame-right-<<vid_us>>"><strong>-- F</strong></span>
-                        </div>
-                        <input type="range" id="seek-frame-<<vid_us>>" min="0" max="<<seek_max_init>>" step="1" value="<<start_frame>>" style="width:100%;">
-                        <div id="add-single-wrap-<<vid_us>>" style="display:none; margin-top:10px; text-align:center;">
-                            <button id="add-single-<<vid_us>>" class="add-btn">Add</button>
-                        </div>
-                        <div id="trake-add-single-wrap-<<vid_us>>" style="display:none; margin-top:10px; text-align:center;">
-                            <button id="trake-add-single-<<vid_us>>" class="add-btn">Add</button>
-                        </div>
-                        <div style="margin-top:10px;">
-                            <div class="price-input" id="rs-inputs-<<vid_us>>">
-                                <div class="field" style="flex: 1;">
-                                    <span>Min</span>
-                                    <input type="number" class="input-min" id="rs-input-min-<<vid_us>>" value="<<start_frame>>">
-                                    <button class="current-btn" id="rs-min-current-<<vid_us>>" title="Set Min to Current Frame">Current</button>
-                                </div>
-                                <div class="separator">-</div>
-                                <div class="field" style="flex: 1;">
-                                    <span>Max</span>
-                                    <input type="number" class="input-max" id="rs-input-max-<<vid_us>>" value="<<start_frame_plus_1>>">
-                                    <button class="current-btn" id="rs-max-current-<<vid_us>>" title="Set Max to Current Frame">Current</button>
-                                </div>
-                                <div class="step-controls">
-                                    <span class="step-label">Step:</span>
-                                    <input type="number" class="step-input" id="rs-step-size-<<vid_us>>" value="5" min="1" max="100">
-                                    <button class="step-btn" id="rs-max-up-<<vid_us>>" title="Tăng Max">▲</button>
-                                    <button class="step-btn" id="rs-max-down-<<vid_us>>" title="Giảm Max">▼</button>
-                                </div>
-                            </div>
-                            <div class="slider" id="rs-slider-<<vid_us>>">
-                                <div class="progress" id="rs-progress-<<vid_us>>"></div>
-                            </div>
-                            <div class="range-input">
-                                <input type="range" class="range-min" id="rs-range-min-<<vid_us>>" min="0" max="<<seek_max_init>>" value="<<start_frame>>" step="1">
-                                <input type="range" class="range-max" id="rs-range-max-<<vid_us>>" min="0" max="<<seek_max_init>>" value="<<start_frame_plus_1>>" step="1">
-                            </div>
-                            <div id="add-batch-wrap-<<vid_us>>" style="display:none; margin-top:10px; text-align:center;">
-                                <div id="frames-total-display-<<vid_us>>" style="margin-bottom:8px; font-size:12px; color:#ccc;">
-                                    <strong>Frames total: <span id="frames-total-count-<<vid_us>>">0</span></strong>
-                                </div>
-                                <button id="add-batch-<<vid_us>>" class="add-btn">Add Batch</button>
-                            </div>
-                            <div id="trake-add-batch-wrap-<<vid_us>>" style="display:none; margin-top:10px; text-align:center;">
-                                <div id="trake-frames-total-display-<<vid_us>>" style="margin-bottom:8px; font-size:12px; color:#ccc;">
-                                    <strong>Frames total: <span id="trake-frames-total-count-<<vid_us>>">0</span></strong>
-                                </div>
-                                <button id="trake-add-batch-<<vid_us>>" class="add-btn">Add Batch</button>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            <div class="info-panel">
-                <div class="time-display" id="current-time-<<vid_us>>">00:00:00</div>
-                <h4>Current Frame:</h4>
-                <div class="frame-display" id="current-frame-<<vid_us>>"><<start_frame>></div>
-                <div class="status">
-                     <p><strong>Start Time:</strong> <span id="start-time-display-<<vid_us>>">00:00</span></p>
-                    <p><strong>Start Frame:</strong> <<start_frame>></p>
-                    <p><strong>FPS:</strong> <<fps>></p>
-                    <p><strong>Status:</strong> <span id="status-<<vid_us>>">Initializing...</span></p>
-                    <p><strong>Player State:</strong> <span id="player-state-<<vid_us>>">Unknown</span></p>
-                    <div class="top-form" id="qa-form-<<vid_us>>">
-                        <div class="form-group">
-                            <label for="question-count-<<vid_us>>">Câu hỏi:</label>
-                            <input type="number" id="question-count-<<vid_us>>" min="1" placeholder="Nhập số câu hỏi">
-                        </div>
-                        <div class="form-group">
-                            <label for="task-select-<<vid_us>>">Task:</label>
-                            <select id="task-select-<<vid_us>>">
-                                <option value="KIS">KIS</option>
-                                <option value="QA">QA</option>
-                                <option value="TRAKE">TRAKE</option>
-                            </select>
-                        </div>
-                        <div class="form-group" id="qa-answer-wrap-<<vid_us>>" style="display:none;">
-                            <label for="qa-answer-<<vid_us>>">Đáp án QA:</label>
-                            <input type="text" id="qa-answer-<<vid_us>>" placeholder="Nhập đáp án">
-                        </div>
-                        <div class="form-group" id="trake-scenes-wrap-<<vid_us>>" style="display:none;">
-                            <label for="trake-scenes-<<vid_us>>">Scenes:</label>
-                              <input type="number" id="trake-scenes-<<vid_us>>" min="1" max="10" placeholder="Nhập số cảnh" style="width:40px; height:40px; text-align:center;">
-                              <div id="trake-scene-inputs-<<vid_us>>" style="margin-top:10px;"></div>
-                              <div id="trake-total-display-<<vid_us>>" style="margin-top:10px; padding:8px; background:#333; border-radius:4px; text-align:center; color:#fff; font-size:12px; display:none;">
-                                  <strong>Tổng số frame: <span id="trake-total-count-<<vid_us>>">0</span></strong>
-                              </div>
-                              <div style="text-align:right; margin-top:20px;">
-                                  <button id="trake-confirm-<<vid_us>>" class="trake-confirm-btn" style="display:none;">Confirm</button>
-                                <div id="trake-success-notification-<<vid_us>>" class="notification" style="position:relative; top:auto; left:auto; right:auto; margin-top:10px; text-align:center;"></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <div style="text-align:right; margin:1px 0; padding:1px 0; position:relative;">
-            <button id="import-csv-<<vid_us>>" class="save-csv-btn import-btn" style="margin-right:10px; background:#28a745; border-color:#28a745;">Import CSV</button>
-            <button id="export-csv-<<vid_us>>" class="save-csv-btn">Export CSV</button>
-            <input type="file" id="csv-file-input-<<vid_us>>" accept=".csv" style="display:none;">
-            <div id="csv-notification-<<vid_us>>" class="notification" style="position:absolute; top:100%; right:0; left:auto; margin-top:5px; text-align:right; max-width:300px;"></div>
-        </div>
-        <div class="preview-wrapper">
-            <div class="preview-card" id="preview-card-<<vid_us>>">
-                <div class="preview-header">
-                    <div><strong>Preview Result</strong></div>
-                    <div class="preview-controls">
-                        <div class="preview-hint">Chọn dòng rồi nhấn <kbd>Delete</kbd> để xóa</div>
-                        <div class="delete-range-controls">
-                            <span>Delete range:</span>
-                            <input type="number" id="delete-from-<<vid_us>>" placeholder="From" min="1" style="width:60px; margin:0 5px;">
-                            <span>-</span>
-                            <input type="number" id="delete-to-<<vid_us>>" placeholder="To" min="1" style="width:60px; margin:0 5px;">
-                            <button id="delete-range-btn-<<vid_us>>" class="delete-range-btn">Delete</button>
-                            <div id="notification-<<vid_us>>" class="notification"></div>
-                        </div>
-                    </div>
-                </div>
-                <div class="pr-list" id="pr-list-<<vid_us>>"></div>
-                <div class="pr-empty" id="pr-empty-<<vid_us>>" style="display:none;">(Trống)</div>
-            </div>
-        </div>
-
-        <script>
-            var timeUpdateInterval_<<vid_us>>;
-            var fps = <<fps>>;
-            var startTime = <<start_time>>;
-            var previewData_<<vid_us>> = [];
-            window._seeking_<<vid_us>> = false;
-
-            (function ensureScrollable(){ try { document.documentElement.style.overflowY = 'auto'; document.body.style.overflowY = 'auto'; } catch(_){} })();
-
-            function formatTimeMMSS(s){var m=Math.floor(s/60),c=Math.floor(s%60);return`${String(m).padStart(2,'0')}:${String(c).padStart(2,'0')}`}
-            function formatTimeMMSSFF(s,fps){var m=Math.floor(s/60),c=Math.floor(s%60),f=Math.floor((s%1)*fps);return`${String(m).padStart(2,'0')}:${String(c).padStart(2,'0')}:${String(f).padStart(2,'0')}`}
-            function calculateFrame(t){return Math.floor(t*fps);}
-
-            function renderPreview_<<vid_us>>() {
-                var list = document.getElementById('pr-list-<<vid_us>>'); if (!list) return;
-                list.innerHTML = '';
-                previewData_<<vid_us>>.forEach(function(val, idx){
-                    var row = document.createElement('div'); row.className = 'pr-row'; row.tabIndex = 0; row.dataset.index = idx;
-                    row.innerHTML = '<div class="pr-index">'+String(idx+1).padStart(2,"0")+'</div><div class="pr-value">'+val+'</div>';
-                    row.addEventListener('click', function(e){ if (!e.ctrlKey && !e.metaKey) { document.querySelectorAll('#pr-list-<<vid_us>> .pr-row.selected').forEach(function(r){ r.classList.remove('selected'); }); } row.classList.toggle('selected'); row.focus(); });
-                    list.appendChild(row);
-                });
-                var empty = document.getElementById('pr-empty-<<vid_us>>'); if (empty) empty.style.display = previewData_<<vid_us>>.length ? 'none' : 'block';
-            }
-            function showNotification_<<vid_us>>(message, isError=false) { var n=document.getElementById('notification-<<vid_us>>'); if(!n)return; n.textContent=message; n.className='notification'+(isError?' error':''); n.classList.add('show'); setTimeout(function(){n.classList.remove('show');},3000); }
-            function isInputLike_<<vid_us>>(el){ if (!el) return false; var tag=(el.tagName||'').toUpperCase(); return el.isContentEditable || tag==='INPUT' || tag==='TEXTAREA' || tag==='SELECT'; }
-            function deleteSelectedPreviewRows_<<vid_us>>() {
-                var list = document.getElementById('pr-list-<<vid_us>>'); if (!list) return;
-                var selected = Array.from(list.querySelectorAll('.pr-row.selected')); if (!selected.length) { showNotification_<<vid_us>>('Vui lòng chọn dòng cần xóa', true); return; }
-                var idxs = selected.map(function(el){ return parseInt(el.dataset.index); }).sort(function(a,b){ return b-a; });
-                idxs.forEach(function(i){ if (i>=0 && i<previewData_<<vid_us>>.length) previewData_<<vid_us>>.splice(i,1); });
-                renderPreview_<<vid_us>>(); showNotification_<<vid_us>>('Đã xóa ' + idxs.length + ' dòng được chọn');
-            }
-            document.addEventListener('keydown', function(e){ if (e.key==='Delete' && !isInputLike_<<vid_us>>(document.activeElement)) { if (document.querySelector('#pr-list-<<vid_us>> .pr-row.selected')) { e.preventDefault(); deleteSelectedPreviewRows_<<vid_us>>(); } } });
-
-            // --- Player-specific JS handlers will be injected here ---
-            <<PLAYER_JS_HANDLERS>>
-
-            // --- THIS IS THE FULL, RESTORED DOMContentLoaded LISTENER FROM YOUR ORIGINAL FILE ---
-            document.addEventListener('DOMContentLoaded', function(){
-                renderPreview_<<vid_us>>();
-                var startTimeEl = document.getElementById('start-time-display-<<vid_us>>');
-                if (startTimeEl) startTimeEl.textContent = formatTimeMMSS(startTime);
-
-                var gotoInput = document.getElementById('goto-frame-<<vid_us>>');
-                if (gotoInput){ gotoInput.addEventListener('keydown',function(e){ if(e.key==='Enter'){ var f=parseInt(gotoInput.value,10); if(!isNaN(f)&&f>=0){ var t=f/fps; try{ player_<<vid_us>>.seekTo(t,true); } catch(_){ try { player_<<vid_us>>.currentTime = t; } catch(__){} } } } }); }
-                
-                var taskSel=document.getElementById('task-select-<<vid_us>>'), qaWrap=document.getElementById('qa-answer-wrap-<<vid_us>>'), scenesWrap=document.getElementById('trake-scenes-wrap-<<vid_us>>'), addSingleWrap=document.getElementById('add-single-wrap-<<vid_us>>'), addBatchWrap=document.getElementById('add-batch-wrap-<<vid_us>>'), framesTotalDisplay=document.getElementById('frames-total-display-<<vid_us>>'), framesTotalCount=document.getElementById('frames-total-count-<<vid_us>>'), trakeAddSingleWrap=document.getElementById('trake-add-single-wrap-<<vid_us>>'), trakeAddBatchWrap=document.getElementById('trake-add-batch-wrap-<<vid_us>>'), trakeFramesTotalDisplay=document.getElementById('trake-frames-total-display-<<vid_us>>'), trakeFramesTotalCount=document.getElementById('trake-frames-total-count-<<vid_us>>'), trakeSceneNumberWrap=document.getElementById('trake-scene-number-wrap-<<vid_us>>'), trakeSceneButtons=document.getElementById('trake-scene-buttons-<<vid_us>>'), trakeSceneInputs=document.getElementById('trake-scene-inputs-<<vid_us>>'), trakeConfirmBtn=document.getElementById('trake-confirm-<<vid_us>>'), trakeScenesInput=document.getElementById('trake-scenes-<<vid_us>>'), trakeTotalDisplay=document.getElementById('trake-total-display-<<vid_us>>'), trakeTotalCount=document.getElementById('trake-total-count-<<vid_us>>');
-                var selectedSceneNum = 1;
-
-                function updateTaskUI(){ if(!taskSel)return; var v=taskSel.value; if(qaWrap)qaWrap.style.display=v==='QA'?'flex':'none'; if(scenesWrap)scenesWrap.style.display=v==='TRAKE'?'flex':'none'; var k=v==='KIS'||v==='QA'; if(addSingleWrap)addSingleWrap.style.display=k?'block':'none'; if(addBatchWrap)addBatchWrap.style.display=k?'block':'none'; if(framesTotalDisplay)framesTotalDisplay.style.display=k?'block':'none'; var t=v==='TRAKE'; if(trakeAddSingleWrap)trakeAddSingleWrap.style.display=t?'block':'none'; if(trakeAddBatchWrap)trakeAddBatchWrap.style.display=t?'block':'none'; if(trakeFramesTotalDisplay)trakeFramesTotalDisplay.style.display=t?'block':'none'; if(trakeSceneNumberWrap)trakeSceneNumberWrap.style.display=t?'block':'none'; if(trakeTotalDisplay)trakeTotalDisplay.style.display=t?'block':'none'; }
-                if(taskSel){ taskSel.addEventListener('change', updateTaskUI); updateTaskUI(); }
-
-                function getCurrentFrame() { try { return calculateFrame(player_<<vid_us>>.getCurrentTime()); } catch(e) { try { return calculateFrame(player_<<vid_us>>.currentTime); } catch(e2) { return 0; } } }
-                var addSingleBtn=document.getElementById('add-single-<<vid_us>>'), qaAnswerInput=document.getElementById('qa-answer-<<vid_us>>');
-                if(addSingleBtn){ addSingleBtn.addEventListener('click', function(){ if(previewData_<<vid_us>>.length>=100){alert('Limit 100 rows'); return;} var cf=getCurrentFrame(); var vn='<<video_name>>'; var task=taskSel.value; if(task==='KIS'){previewData_<<vid_us>>.push(vn+', '+cf);}else if(task==='QA'){var a=qaAnswerInput.value.trim();if(!a){alert('Please enter QA answer');return;}previewData_<<vid_us>>.push(vn+', '+cf+', "'+a+'"');} renderPreview_<<vid_us>>(); }); }
-                var addBatchBtn=document.getElementById('add-batch-<<vid_us>>');
-                if(addBatchBtn){ addBatchBtn.addEventListener('click', function(){ var minF=parseInt(document.getElementById('rs-input-min-<<vid_us>>').value)||0, maxF=parseInt(document.getElementById('rs-input-max-<<vid_us>>').value)||0; var vn='<<video_name>>'; var task=taskSel.value; var frames=[]; var a=qaAnswerInput.value.trim(); if(task==='QA'&&!a){alert('Please enter QA answer');return;} for(var f=minF;f<=maxF;f++){if(previewData_<<vid_us>>.length+frames.length>=100)break; if(task==='KIS')frames.push(vn+', '+f); else if(task==='QA')frames.push(vn+', '+f+', "'+a+'"');} previewData_<<vid_us>>.push(...frames); renderPreview_<<vid_us>>(); }); }
-
-                var frameSlider=document.getElementById('seek-frame-<<vid_us>>'), frameLeft=document.getElementById('frame-left-<<vid_us>>');
-                if(frameSlider){
-                    frameSlider.addEventListener('input',function(){ window._seeking_<<vid_us>>=true; var f=parseInt(frameSlider.value,10)||0; if(frameLeft) frameLeft.innerHTML='<strong>'+f+' F</strong>'; });
-                    frameSlider.addEventListener('change',function(){ var f=parseInt(frameSlider.value,10)||0; var t=f/fps; try{player_<<vid_us>>.seekTo(t,true);}catch(_){try{player_<<vid_us>>.currentTime=t;}catch(__){}} window._seeking_<<vid_us>>=false; });
-                    frameSlider.addEventListener('mousedown',function(){ window._seeking_<<vid_us>>=true; });
-                    frameSlider.addEventListener('mouseup',function(){ window._seeking_<<vid_us>>=false; });
-                }
-
-                var rangeMin=document.getElementById('rs-range-min-<<vid_us>>'), rangeMax=document.getElementById('rs-range-max-<<vid_us>>'), inputMin=document.getElementById('rs-input-min-<<vid_us>>'), inputMax=document.getElementById('rs-input-max-<<vid_us>>'), progress=document.getElementById('rs-progress-<<vid_us>>');
-                function updateRangeSlider(){ var mn=parseInt(rangeMin.value), mx=parseInt(rangeMax.value); if(mx<mn){mx=mn;rangeMax.value=mn;} if(mn>mx){mn=mx;rangeMin.value=mx;} inputMin.value=mn; inputMax.value=mx; var maxV=parseInt(rangeMin.max); if(progress){progress.style.left=(mn/maxV*100)+'%'; progress.style.right=(100-(mx/maxV*100))+'%';} var total=mx-mn+1; if(framesTotalCount)framesTotalCount.textContent=total; if(trakeFramesTotalCount)trakeFramesTotalCount.textContent=total;}
-                if(rangeMin)rangeMin.addEventListener('input', updateRangeSlider);
-                if(rangeMax)rangeMax.addEventListener('input', updateRangeSlider);
-                var minCurrentBtn=document.getElementById('rs-min-current-<<vid_us>>'); if(minCurrentBtn)minCurrentBtn.addEventListener('click',function(){rangeMin.value=getCurrentFrame(); updateRangeSlider();});
-                var maxCurrentBtn=document.getElementById('rs-max-current-<<vid_us>>'); if(maxCurrentBtn)maxCurrentBtn.addEventListener('click',function(){rangeMax.value=getCurrentFrame(); updateRangeSlider();});
-                var stepInput=document.getElementById('rs-step-size-<<vid_us>>'), maxUp=document.getElementById('rs-max-up-<<vid_us>>'), maxDown=document.getElementById('rs-max-down-<<vid_us>>');
-                if(maxUp)maxUp.addEventListener('click',function(){var s=parseInt(stepInput.value); rangeMax.value=Math.min(parseInt(rangeMax.max), parseInt(rangeMax.value)+s); updateRangeSlider();});
-                if(maxDown)maxDown.addEventListener('click',function(){var s=parseInt(stepInput.value); rangeMax.value=Math.max(parseInt(rangeMax.min), parseInt(rangeMax.value)-s); updateRangeSlider();});
-                
-                var delRangeBtn=document.getElementById('delete-range-btn-<<vid_us>>');
-                if(delRangeBtn)delRangeBtn.addEventListener('click', function(){
-                     var fromInput = document.getElementById('delete-from-<<vid_us>>'); var toInput = document.getElementById('delete-to-<<vid_us>>'); if (!fromInput || !toInput) return;
-                     var from=parseInt(fromInput.value), to=parseInt(toInput.value);
-                     if(isNaN(from)||isNaN(to)||from<1||to<from||to>previewData_<<vid_us>>.length){ showNotification_<<vid_us>>('Invalid range',true); return; }
-                     previewData_<<vid_us>>.splice(from-1, to-from+1); fromInput.value=''; toInput.value=''; renderPreview_<<vid_us>>(); showNotification_<<vid_us>>('Deleted rows '+from+'-'+to);
-                });
-
-                var exportCsvBtn=document.getElementById('export-csv-<<vid_us>>'), importCsvBtn=document.getElementById('import-csv-<<vid_us>>'), csvFileInput=document.getElementById('csv-file-input-<<vid_us>>'), csvNotification=document.getElementById('csv-notification-<<vid_us>>');
-                function showCsvNotification(message,isError=false){ if(!csvNotification)return; csvNotification.textContent=message; if(isError){csvNotification.classList.add('error');}else{csvNotification.classList.remove('error');} csvNotification.classList.add('show'); setTimeout(function(){csvNotification.classList.remove('show');},3000); }
-                if(exportCsvBtn){ exportCsvBtn.addEventListener('click', function(){ try { var qCount=document.getElementById('question-count-<<vid_us>>').value; if(!qCount||parseInt(qCount)<=0){showCsvNotification('Please enter question number',true); return;} if(!previewData_<<vid_us>>||previewData_<<vid_us>>.length===0){showCsvNotification('No data to export',true); return;} var task=document.getElementById('task-select-<<vid_us>>').value.toLowerCase(); var filename='query-'+qCount+'-'+task+'.csv'; var csv=previewData_<<vid_us>>.join('\\n'); var blob=new Blob([csv],{type:'text/csv;charset=utf-8;'}); var url=window.URL.createObjectURL(blob); var a=document.createElement('a'); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); document.body.removeChild(a); window.URL.revokeObjectURL(url); showCsvNotification('Exported '+filename); } catch(e){ showCsvNotification('Export failed: '+e.message,true); } }); }
-                if(importCsvBtn&&csvFileInput){ importCsvBtn.addEventListener('click',function(){ if(previewData_<<vid_us>>&&previewData_<<vid_us>>.length>0){showCsvNotification('Can only import to empty preview.',true);return;} csvFileInput.click(); }); csvFileInput.addEventListener('change',function(event){ var file=event.target.files[0]; if(!file)return; var reader=new FileReader(); reader.onload=function(e){ try{var content=e.target.result; var lines=content.split(/\\r\\n|\\n/).filter(function(line){return line.trim()!==''}); if(lines.length===0){showCsvNotification('Empty or invalid CSV file.',true);return;} previewData_<<vid_us>>=lines; renderPreview_<<vid_us>>(); showCsvNotification('Imported '+lines.length+' rows from '+file.name, false);}catch(err){showCsvNotification('Error reading file: '+err.message,true);} }; reader.readAsText(file); event.target.value=''; }); }
-
-                // TRAKE Logic
-                if(trakeScenesInput)trakeScenesInput.addEventListener('input',function(){ var n=parseInt(this.value); if(n>0&&n<=10){createTrakeSceneInputs(n);createTrakeSceneButtons(n);}else{if(trakeSceneInputs)trakeSceneInputs.innerHTML='';if(trakeSceneButtons)trakeSceneButtons.innerHTML='';if(trakeConfirmBtn)trakeConfirmBtn.style.display='none';} });
-                function createTrakeSceneButtons(n){ if(!trakeSceneButtons)return; trakeSceneButtons.innerHTML=''; for(var i=1;i<=n;i++){var b=document.createElement('button'); b.className='trake-scene-btn'; b.id='trake-scene-btn-'+i+'-<<vid_us>>'; b.textContent=i; b.addEventListener('click',function(i){return function(){trakeSceneButtons.querySelectorAll('.selected').forEach(el=>el.classList.remove('selected'));this.classList.add('selected');selectedSceneNum=i;};}(i)); trakeSceneButtons.appendChild(b);} if(n>0){trakeSceneButtons.firstChild.classList.add('selected'); selectedSceneNum=1;} }
-                function createTrakeSceneInputs(n){ if(!trakeSceneInputs)return; trakeSceneInputs.innerHTML=''; for(var i=1;i<=n;i++){var d=document.createElement('div'); d.className='trake-scene-input'; d.innerHTML='<label>Scene '+i+': Total <span id="trake-scene-count-'+i+'-<<vid_us>>" style="color:#4CAF50;">0</span> frames</label><input type="text" id="trake-scene-'+i+'-<<vid_us>>" placeholder="Frame or [start,end]">'; trakeSceneInputs.appendChild(d); d.querySelector('input').addEventListener('input',calculateTrakeTotal);} if(trakeConfirmBtn)trakeConfirmBtn.style.display='block'; if(trakeTotalDisplay)trakeTotalDisplay.style.display='block'; calculateTrakeTotal(); }
-                function calculateTrakeTotal(){ if(!trakeScenesInput||!trakeTotalCount)return; var numScenes=parseInt(trakeScenesInput.value)||0; if(numScenes===0){trakeTotalCount.textContent='0';return;} var total=1, hasInput=false; for(var i=1;i<=numScenes;i++){var inp=document.getElementById('trake-scene-'+i+'-<<vid_us>>'); var countDisp=document.getElementById('trake-scene-count-'+i+'-<<vid_us>>'); if(!inp)continue; var v=inp.value.trim(), sc=0; if(v.startsWith('[')&&v.endsWith(']')){var p=v.slice(1,-1).split(','); if(p.length===2){var s=parseInt(p[0].trim()), e=parseInt(p[1].trim()); if(!isNaN(s)&&!isNaN(e)&&s<=e)sc=e-s+1;}}else{if(!isNaN(parseInt(v)))sc=1;} if(countDisp)countDisp.textContent=sc; if(sc>0){total*=sc; hasInput=true;}} trakeTotalCount.textContent=hasInput?total.toLocaleString():'0'; }
-                if(trakeConfirmBtn)trakeConfirmBtn.addEventListener('click', function(){ generateTrakeCombinations(); });
-                function generateTrakeCombinations() {
-                    var combinations = []; var sceneInputs = trakeSceneInputs.querySelectorAll('.trake-scene-input input'); var videoName = '<<video_name>>';
-                    var sceneData = [];
-                    for (var i = 0; i < sceneInputs.length; i++) {
-                        var value = sceneInputs[i].value.trim(); if (!value) { showTrakeSuccessNotification('Vui lòng nhập đầy đủ tất cả các scene', true); return; }
-                        var frames = [];
-                        if (value.startsWith('[') && value.endsWith(']')) { var range = value.slice(1, -1).split(','); if (range.length !== 2) { showTrakeSuccessNotification('Format range không đúng. Sử dụng [start,end]', true); return; } var start = parseInt(range[0]); var end = parseInt(range[1]); if (isNaN(start) || isNaN(end) || start > end) { showTrakeSuccessNotification('Range không hợp lệ', true); return; } for (var frame = start; frame <= end; frame++) { frames.push(frame); } } else { var frame = parseInt(value); if (isNaN(frame)) { showTrakeSuccessNotification('Frame không hợp lệ: ' + value, true); return; } frames.push(frame); }
-                        sceneData.push(frames);
-                    }
-                    function generateCombos(scenes, currentCombo, index) { if (index === scenes.length) { combinations.push([videoName].concat(currentCombo)); return; } for (var i = 0; i < scenes[index].length; i++) { generateCombos(scenes, currentCombo.concat(scenes[index][i]), index + 1); } }
-                    generateCombos(sceneData, [], 0);
-                    if (previewData_<<vid_us>>.length + combinations.length > 100) { showTrakeSuccessNotification('Sẽ vượt quá giới hạn 100 dòng! Chỉ thêm được ' + (100 - previewData_<<vid_us>>.length) + ' combinations.', true); return; }
-                    var formattedCombinations = combinations.map(function(combo) { return combo.join(', '); });
-                    previewData_<<vid_us>>.push.apply(previewData_<<vid_us>>, formattedCombinations); renderPreview_<<vid_us>>();
-                    var notif = document.getElementById('trake-success-notification-<<vid_us>>'); if(notif){notif.textContent = 'Đã thêm ' + combinations.length + ' combinations thành công!'; notif.classList.remove('error'); notif.classList.add('show'); setTimeout(()=>notif.classList.remove('show'), 3000);}
-                }
-                var trakeAddSingleBtn=document.getElementById('trake-add-single-<<vid_us>>'); if(trakeAddSingleBtn)trakeAddSingleBtn.addEventListener('click',function(){ var cf=getCurrentFrame(); var inp=document.getElementById('trake-scene-'+selectedSceneNum+'-<<vid_us>>'); if(inp){inp.value=cf; var btn=document.getElementById('trake-scene-btn-'+selectedSceneNum+'-<<vid_us>>'); if(btn)btn.classList.add('selected'); calculateTrakeTotal(); autoAdvanceToNextScene();} });
-                var trakeAddBatchBtn=document.getElementById('trake-add-batch-<<vid_us>>'); if(trakeAddBatchBtn)trakeAddBatchBtn.addEventListener('click',function(){ var minF=parseInt(document.getElementById('rs-input-min-<<vid_us>>').value)||0; var maxF=parseInt(document.getElementById('rs-input-max-<<vid_us>>').value)||0; var inp=document.getElementById('trake-scene-'+selectedSceneNum+'-<<vid_us>>'); if(inp){inp.value='['+minF+','+maxF+']'; var btn=document.getElementById('trake-scene-btn-'+selectedSceneNum+'-<<vid_us>>'); if(btn)btn.classList.add('selected'); calculateTrakeTotal(); autoAdvanceToNextScene();} });
-                function autoAdvanceToNextScene(){ var nextNum=selectedSceneNum+1; if(nextNum<=trakeSceneButtons.children.length){ document.getElementById('trake-scene-btn-'+selectedSceneNum+'-<<vid_us>>').classList.remove('selected'); selectedSceneNum=nextNum; document.getElementById('trake-scene-btn-'+selectedSceneNum+'-<<vid_us>>').classList.add('selected'); } }
-            });
-        </script>
-    </body>
-    </html>
-    """
-    # Replace all placeholders
-    full_html = (html_template
-        .replace("<<vid_us>>", vid_us)
-        .replace("<<video_name>>", video_name)
-        .replace("<<start_time>>", f"{start_time:.1f}")
-        .replace("<<fps>>", f"{fps}")
-        .replace("<<start_frame>>", str(start_frame))
-        .replace("<<start_frame_plus_1>>", str(start_frame_plus_1))
-        .replace("<<seek_max_init>>", str(seek_max_init))
-        .replace("<<PLAYER_HTML>>", player_html)
-        .replace("<<PLAYER_JS_INIT>>", player_js_init)
-        .replace("<<PLAYER_JS_HANDLERS>>", player_js_handlers)
-    )
-    return full_html
+    return reordered[:top_videos]
 
 
-def create_youtube_player_html(youtube_id: str, start_time: float, fps: float, video_name: str) -> str:
-    vid_us = re.sub(r'[^a-zA-Z0-9_]', '_', video_name)
-    player_html = f'<iframe id="ytplayer-{vid_us}" src="https://www.youtube.com/embed/{youtube_id}?start={int(start_time)}&enablejsapi=1&autoplay=0&rel=0&modestbranding=1&showinfo=0&controls=1&fs=1&cc_load_policy=0&iv_load_policy=3&playsinline=1" frameborder="0" allowfullscreen></iframe>'
-    # The original code dynamically created the script tag. This is a robust pattern.
-    player_js_init = """
-        <script>
-            if (!window.YT) { // Only create script tag if not already there
-                var tag = document.createElement('script');
-                tag.src = "https://www.youtube.com/iframe_api";
-                var firstScriptTag = document.getElementsByTagName('script')[0];
-                firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-            }
-        </script>
-    """
-    player_js_handlers = f"""
-    var player_{vid_us};
-    function onYouTubeIframeAPIReady(){{ 
-        console.log('[DEBUG] Creating YouTube player for: {vid_us}');
-        if(!document.getElementById('ytplayer-{vid_us}')) {{
-            console.log('[DEBUG] Element ytplayer-{vid_us} not found, skipping');
-            return; 
-        }}
-        // Stop all other YouTube players before creating new one
-        if(window.stopAllYouTubePlayers) {{
-            console.log('[DEBUG] Stopping all other YouTube players before creating {vid_us}');
-            window.stopAllYouTubePlayers();
-        }}
-        player_{vid_us}=new YT.Player('ytplayer-{vid_us}',{{events:{{'onReady':onPlayerReady_{vid_us},'onStateChange':onPlayerStateChange_{vid_us}}}}}); 
-        // Register this player for global management
-        if(!window.youtubePlayers) window.youtubePlayers = [];
-        window.youtubePlayers.push(player_{vid_us});
-        console.log('[DEBUG] Registered player {vid_us}, total players:', window.youtubePlayers.length);
-    }}
-    function onPlayerReady_{vid_us}(event){{
-        console.log('[DEBUG] Player {vid_us} is ready');
-        document.getElementById('status-{vid_us}').textContent='Player Ready';
-        try{{
-            // Force video to load and display properly
-            event.target.seekTo({start_time}, true);
-            // Try to play and immediately pause to trigger video load
-            event.target.playVideo();
-            setTimeout(function() {{
-                try {{ event.target.pauseVideo(); }} catch(e) {{ console.log('[DEBUG] Error pausing after load:', e); }}
-            }}, 100);
-        }}catch(e){{
-            console.log('[DEBUG] Error in onPlayerReady:', e);
-        }}
-        try{{var d=event.target.getDuration(); if(d){{var mF=Math.floor(d*{fps});document.getElementById('seek-frame-{vid_us}').max=mF;document.getElementById('rs-range-min-{vid_us}').max=mF;document.getElementById('rs-range-max-{vid_us}').max=mF;document.getElementById('frame-right-{vid_us}').innerHTML='<strong>'+mF+' F</strong>';}} }}catch(_){{}}
-        if(timeUpdateInterval_{vid_us})clearInterval(timeUpdateInterval_{vid_us}); timeUpdateInterval_{vid_us}=setInterval(updateTimeAndFrame_{vid_us},200);
-    }}
-    function onPlayerStateChange_{vid_us}(e){{ 
-        var s={{0:'Ended',1:'Playing',2:'Paused',3:'Buffering',5:'Cued', '-1': 'Unstarted'}}; 
-        console.log('[DEBUG] Player {vid_us} state changed to:', s[e.data] || 'Unknown', '(', e.data, ')');
-        document.getElementById('player-state-{vid_us}').textContent=s[e.data]||'Unknown'; 
-        updateTimeAndFrame_{vid_us}();
-        // If this player starts playing, stop all other players
-        if(e.data === 1 && window.stopAllYouTubePlayers) {{
-            console.log('[DEBUG] Player {vid_us} started playing, stopping all other players');
-            window.stopAllYouTubePlayers(player_{vid_us});
-        }}
-    }}
-    function updateTimeAndFrame_{vid_us}(){{
-        if(!player_{vid_us}||typeof player_{vid_us}.getCurrentTime !== 'function')return;
-        var t=player_{vid_us}.getCurrentTime(), f=calculateFrame(t);
-        document.getElementById('current-time-{vid_us}').textContent=formatTimeMMSSFF(t,{fps});
-        document.getElementById('current-frame-{vid_us}').textContent=f;
-        var s=document.getElementById('seek-frame-{vid_us}'); if(s&&!window._seeking_{vid_us}){{s.value=f;document.getElementById('frame-left-{vid_us}').innerHTML='<strong>'+f+' F</strong>';}}
-    }}
-    // Global function to stop all YouTube players except the current one
-    if(!window.stopAllYouTubePlayers) {{
-        window.stopAllYouTubePlayers = function(currentPlayer) {{
-            console.log('[DEBUG] stopAllYouTubePlayers called, currentPlayer:', currentPlayer ? 'provided' : 'none');
-            if(window.youtubePlayers) {{
-                console.log('[DEBUG] Found', window.youtubePlayers.length, 'registered players');
-                window.youtubePlayers.forEach(function(player, index) {{
-                    if(player && player !== currentPlayer && typeof player.pauseVideo === 'function') {{
-                        try {{ 
-                            console.log('[DEBUG] Pausing player', index);
-                            player.pauseVideo(); 
-                        }} catch(e) {{ 
-                            console.log('[DEBUG] Error pausing player', index, ':', e); 
-                        }}
-                    }}
-                }});
-            }} else {{
-                console.log('[DEBUG] No youtubePlayers array found');
-            }}
-        }};
-    }}
-    // Debug panel to show active players
-    if(!window.debugPanelCreated) {{
-        window.debugPanelCreated = true;
-        setInterval(function() {{
-            var debugInfo = document.getElementById('debug-players-info');
-            if(!debugInfo) {{
-                debugInfo = document.createElement('div');
-                debugInfo.id = 'debug-players-info';
-                debugInfo.style.cssText = 'position:fixed;top:10px;right:10px;background:rgba(0,0,0,0.8);color:white;padding:10px;border-radius:5px;z-index:9999;font-size:12px;max-width:300px;';
-                document.body.appendChild(debugInfo);
-            }}
-            var activePlayers = window.youtubePlayers ? window.youtubePlayers.length : 0;
-            debugInfo.innerHTML = '<strong>🎥 Active Players:</strong> ' + activePlayers + '<br><small>Check console for detailed logs</small>';
-        }}, 1000);
-    }}
-    // Video display fix - reload iframe if video appears black
-    setTimeout(function() {{
-        var iframe = document.getElementById('ytplayer-{vid_us}');
-        if(iframe && player_{vid_us}) {{
-            // Check if video is loaded but not displaying properly
-            setTimeout(function() {{
-                try {{
-                    var state = player_{vid_us}.getPlayerState();
-                    if(state === 1 || state === 2) {{ // Playing or Paused
-                        console.log('[DEBUG] Video {vid_us} appears to be playing but may have display issues');
-                        // Try to refresh the iframe
-                        var src = iframe.src;
-                        iframe.src = '';
-                        setTimeout(function() {{
-                            iframe.src = src;
-                            console.log('[DEBUG] Reloaded iframe for {vid_us}');
-                        }}, 100);
-                    }}
-                }} catch(e) {{
-                    console.log('[DEBUG] Error checking player state for {vid_us}:', e);
-                }}
-            }}, 2000);
-        }}
-    }}, 1000);
-    // If the API is already loaded, manually trigger the ready function for this new player instance.
-    if(window.YT && window.YT.Player){{ onYouTubeIframeAPIReady(); }}
-    """
-    return _create_base_player_html(video_id=youtube_id, start_time=start_time, fps=fps, video_name=video_name, player_html=player_html, player_js_init=player_js_init, player_js_handlers=player_js_handlers)
+# ============================ UTILITY FUNCTIONS ============================
 
+def run_with_logs(func, *args, **kwargs):
+    """Run a function and capture its output to a StringIO buffer"""
+    import sys
+    from io import StringIO
 
-def create_local_player_html(file_url: str, start_time: float, fps: float, video_name: str) -> str:
-    vid_us = re.sub(r'[^a-zA-Z0-9_]', '_', video_name)
-    player_html = f'<video id="fileplayer-{vid_us}" preload="metadata" playsinline controls crossorigin="anonymous"><source src="{file_url}" type="video/mp4" /></video>'
-    player_js_init = ''
-    player_js_handlers = f"""
-    var player_{vid_us};
-    document.addEventListener('DOMContentLoaded',function(){{ player_{vid_us}=document.getElementById('fileplayer-{vid_us}'); if(player_{vid_us}){{ player_{vid_us}.addEventListener('loadedmetadata',onPlayerReady_{vid_us}); player_{vid_us}.addEventListener('play',()=>onPlayerStateChange_{vid_us}(1)); player_{vid_us}.addEventListener('pause',()=>onPlayerStateChange_{vid_us}(2)); player_{vid_us}.addEventListener('ended',()=>onPlayerStateChange_{vid_us}(0)); }} }});
-    function onPlayerReady_{vid_us}(){{
-        document.getElementById('status-{vid_us}').textContent='Player Ready';
-        player_{vid_us}.currentTime={start_time};
-        try{{var d=player_{vid_us}.duration; if(d){{var mF=Math.floor(d*{fps});document.getElementById('seek-frame-{vid_us}').max=mF;document.getElementById('rs-range-min-{vid_us}').max=mF;document.getElementById('rs-range-max-{vid_us}').max=mF;document.getElementById('frame-right-{vid_us}').innerHTML='<strong>'+mF+' F</strong>';}} }}catch(_){{}}
-        if(timeUpdateInterval_{vid_us})clearInterval(timeUpdateInterval_{vid_us}); timeUpdateInterval_{vid_us}=setInterval(updateTimeAndFrame_{vid_us},200);
-    }}
-    function onPlayerStateChange_{vid_us}(s){{ var n={{0:'Ended',1:'Playing',2:'Paused'}}; document.getElementById('player-state-{vid_us}').textContent=n[s]||'Buffering'; updateTimeAndFrame_{vid_us}();}}
-    function updateTimeAndFrame_{vid_us}(){{
-        if(!player_{vid_us})return;
-        var t=player_{vid_us}.currentTime, f=calculateFrame(t);
-        document.getElementById('current-time-{vid_us}').textContent=formatTimeMMSSFF(t,{fps});
-        document.getElementById('current-frame-{vid_us}').textContent=f;
-        var s=document.getElementById('seek-frame-{vid_us}'); if(s&&!window._seeking_{vid_us}){{s.value=f;document.getElementById('frame-left-{vid_us}').innerHTML='<strong>'+f+' F</strong>';}}
-    }}
-    """
-    return _create_base_player_html(video_id=video_name, start_time=start_time, fps=fps, video_name=video_name, player_html=player_html, player_js_init=player_js_init, player_js_handlers=player_js_handlers)
+    old_stdout = sys.stdout
+    sys.stdout = buf = StringIO()
 
-def fallback_translate_and_create_aspects(query_vi: str) -> Tuple[List[Dict], Dict]:
-    """Fallback: translate query to English and create aspects from each line"""
     try:
-        # Split query into lines and translate each to English
-        lines = [line.strip() for line in query_vi.split('\n') if line.strip()]
-        translated_lines = []
-        
-        for line in lines:
-            try:
-                # Detect language and translate to English if needed
-                translator = GoogleTranslator(source='auto', target='en')
-                translated = translator.translate(line)
-                translated_lines.append(translated)
-            except Exception as e:
-                print(f"Translation error for '{line}': {e}")
-                translated_lines.append(line)  # Use original if translation fails
-        
-        # Create aspects from translated lines
-        aspects = []
-        for i, line in enumerate(translated_lines):
-            aspect = {
-                "name": f"aspect_{i+1}",
-                "prompts": [line],  # Use translated line as single prompt
-                "weight": 1.0
-            }
-            aspects.append(aspect)
-        
-        # Create minimal seeds (empty for fallback)
-        seeds = {
-            "unigrams": [],
-            "phrases": []
-        }
-        
-        return aspects, seeds
-        
-    except Exception as e:
-        print(f"Fallback translation failed: {e}")
-        # Ultimate fallback: single aspect with original query
-        aspects = [{
-            "name": "fallback_aspect",
-            "prompts": [query_vi],
-            "weight": 1.0
-        }]
-        seeds = {"unigrams": [], "phrases": []}
-        return aspects, seeds
+        result = func(*args, **kwargs)
+        return result, buf
+    finally:
+        sys.stdout = old_stdout
 
-def get_fps_from_csv(video_id: str) -> float:
-    """Get FPS from map-keyframes CSV file"""
-    csv_paths = [
-        f"{DATA_ROOT}b1/map-keyframes/{video_id}.csv",
-        f"{DATA_ROOT}b2/map-keyframes/{video_id}.csv",
-    ]
 
-    for csv_path in csv_paths:
-        try:
-            if os.path.exists(csv_path):
-                df = pd.read_csv(csv_path)
-                if 'fps' in df.columns and len(df) > 0:
-                    # Return the first FPS value (should be consistent)
-                    fps = df['fps'].iloc[0]
-                    return float(fps)
-        except Exception as e:
-            print(f"Error reading FPS from {csv_path}: {e}")
-            continue
+# ============================ SIDEBAR CONFIGURATION ============================
 
-    # Default FPS if not found
-    return 25.0
-
-def get_watch_url(video_id: str) -> Optional[str]:
-    # Try media-info directories for {video_id}.json with a 'watch_url' field
-    media_info_dirs = [
-        f"{DATA_ROOT}b1/media-info/",
-        f"{DATA_ROOT}b2/media-info/",
-    ]
-    candidates = [Path(media_dir) / f"{video_id}.json" for media_dir in media_info_dirs]
-
-    for p in candidates:
-        try:
-            if p.exists():
-                data = json.loads(Path(p).read_text(encoding='utf-8'))
-                url = data.get("watch_url")
-                if url:
-                    return url
-        except Exception:
-            continue
-    return None
-
-def get_video_info(video_id: str) -> Optional[dict]:
-    """Get video information from media-info JSON files"""
-    media_info_dirs = [
-        f"{DATA_ROOT}b1/media-info/",
-        f"{DATA_ROOT}b2/media-info/",
-    ]
-    candidates = [Path(media_dir) / f"{video_id}.json" for media_dir in media_info_dirs]
-
-    for p in candidates:
-        try:
-            if p.exists():
-                data = json.loads(Path(p).read_text(encoding='utf-8'))
-                return data
-        except Exception:
-            continue
-    return None
-
-# Start the local video server in the background
-if not st.session_state.get("_local_video_server_started"):
-    LOCAL_VIDEO_ROOT.mkdir(exist_ok=True)
-    flask_app = make_video_app(str(LOCAL_VIDEO_ROOT.resolve()))
-    ensure_server_once(flask_app, port=8801)
-
-# =============================== STREAMLIT UI ============================================
-st.set_page_config(page_title="Video Retrieval - CLIP + BM25 Search", layout="wide")
-
-# Pre-load CLIP model for faster search (only on first app load)
-if 'clip_model_preloaded' not in st.session_state:
-    with st.spinner("🔄 Loading CLIP model..."):
-        try:
-            ensure_clip_text_encoder()
-            st.success("✅ CLIP model loaded successfully!")
-            st.session_state.clip_model_preloaded = True
-        except Exception as e:
-            st.error(f"❌ Failed to load CLIP model: {e}")
-            st.warning("⚠️ CLIP search will be slower on first use")
-            st.session_state.clip_model_preloaded = True  # Set to True even on error to prevent retry
-
-# ============================ SIDEBAR START =======================================
 with st.sidebar:
     st.title("Configuration")
 
@@ -2654,9 +572,9 @@ with st.sidebar:
         "Search by Video ID",
     ]
     search_mode = st.selectbox("🔎 Search Mode", MODES, index=0, key="search_mode_sel")
-    
-    # Gemini availability toggle (placed below Max aspects and above query input)
-    gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
+
+    # Gemini availability toggle
+    gemini_configured = bool(settings.GEMINI_API_KEY and settings.GEMINI_API_KEY.strip())
     turn_off_gemini = st.checkbox(
         "🔌 Turn off Gemini",
         value=False,
@@ -2665,7 +583,7 @@ with st.sidebar:
     )
     gemini_available = gemini_configured and not turn_off_gemini
 
-    # Row 2: Filter options (collapsible)
+    # Filter options
     with st.expander("🔧 Search Filters", expanded=True):
         # Dataset selection
         st.markdown("**Dataset Selection:**")
@@ -2692,11 +610,14 @@ with st.sidebar:
 
     # Apply dataset selection
     if batch_label == "Batch 1":
-        DATASETS = {"b1"}
+        active_datasets = {"b1"}
     elif batch_label == "Batch 2":
-        DATASETS = {"b2"}
+        active_datasets = {"b2"}
     else:
-        DATASETS = {"b1", "b2"}
+        active_datasets = {"b1", "b2"}
+
+    # Update global settings (for this session)
+    settings.DATASETS = active_datasets
 
     # Show active filters summary
     active_filters = []
@@ -2711,21 +632,22 @@ with st.sidebar:
         st.success(f"**Active Filters:** {', '.join(active_filters)}")
     else:
         st.info("**No filters applied**")
-    # Gemini API Configuration and Testing
+
+    # Gemini API Configuration
     with st.expander("🔑 Gemini API Configuration", expanded=False):
         st.markdown("**Configure and test your Gemini API connection**")
-        
+
         # API Key input
         api_key = st.text_input(
             "Gemini API Key:",
-            value=GOOGLE_API_KEY,
+            value=settings.GEMINI_API_KEY,
             type="password",
             help="Enter your Google Gemini API key."
         )
 
         # Update the global API key if changed
-        if api_key and api_key != GOOGLE_API_KEY:
-            GOOGLE_API_KEY = api_key
+        if api_key and api_key != settings.GEMINI_API_KEY:
+            settings.GEMINI_API_KEY = api_key
             os.environ["GOOGLE_API_KEY"] = api_key
 
         # Gemini Configuration Options
@@ -2740,11 +662,14 @@ with st.sidebar:
             col_temp, col_topp = st.columns(2)
             gemini_temperature = col_temp.slider("Temperature", 0.0, 2.0, 0.7, 0.1)
             gemini_top_p = col_topp.slider("Top P", 0.0, 1.0, 0.9, 0.05)
+        else:
+            gemini_model = "gemini-2.5-flash"
+            gemini_temperature = 0.7
+            gemini_top_p = 0.9
 
         test_button = st.button("🧪 Test Gemini API", type="primary")
-        
+
         if test_button:
-            # (The existing test logic remains unchanged)
             if not api_key:
                 st.error("❌ Please enter your Gemini API key first!")
             else:
@@ -2752,7 +677,10 @@ with st.sidebar:
                     try:
                         from google import genai
                         client = genai.Client(api_key=api_key)
-                        resp = client.models.generate_content(model='gemini-2.0-flash', contents="Hello! Please respond with 'API connection successful' if you can read this message.")
+                        resp = client.models.generate_content(
+                            model='gemini-2.0-flash',
+                            contents="Hello! Please respond with 'API connection successful' if you can read this message."
+                        )
                         response_text = (getattr(resp, "text", None) or getattr(resp, "output_text", None) or "").strip()
                         if response_text:
                             st.success("✅ **Test Successful!**")
@@ -2762,8 +690,8 @@ with st.sidebar:
                     except Exception as e:
                         st.error("❌ **Test Failed!**")
                         st.error(f"**Error:** {str(e)}")
-        
-        if GOOGLE_API_KEY:
+
+        if settings.GEMINI_API_KEY:
             st.success("🔑 **API Key Status:** Configured")
         else:
             st.warning("⚠️ **API Key Status:** Not configured")
@@ -2771,61 +699,63 @@ with st.sidebar:
     # General Settings
     with st.expander("⚙️ General Settings", expanded=False):
         st.markdown("**Time & Ranking**")
-        # (The logic for Time & Ranking settings remains the same)
-        _pending = st.session_state.pop('pending_setting_inputs', None)
-        if _pending:
-            for _k in ['win_str_inp', 'skip_str_inp', 'del_str_inp', 'topk_inp']:
-                st.session_state.pop(_k, None)
-        _win_default = sec_to_mmss(float(st.session_state.get('WINDOW_SEC', WINDOW_SEC)))
-        _skip_default = sec_to_mmss(float(st.session_state.get('SKIP_SEC', SKIP_SEC)))
-        _del_default = sec_to_mmss(float(st.session_state.get('DELTA_SEC', DELTA_SEC)))
-        _top_default = int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS))
+
+        # Get current values or defaults
+        _win_default = sec_to_mmss(SessionStateManager.get('WINDOW_SEC', settings.WINDOW_SEC))
+        _skip_default = sec_to_mmss(SessionStateManager.get('SKIP_SEC', settings.SKIP_SEC))
+        _del_default = sec_to_mmss(SessionStateManager.get('DELTA_SEC', settings.DELTA_SEC))
+        _top_default = int(SessionStateManager.get('TOP_VIDEOS', settings.TOP_VIDEOS))
 
         win_str_inp = st.text_input("Window", value=_win_default, key="win_str_inp")
         skip_str_inp = st.text_input("Skip Intro", value=_skip_default, key="skip_str_inp")
-        
         del_str_inp = st.text_input("Rerank Window", value=_del_default, key="del_str_inp")
         topk_inp = st.number_input("Top K", 1, 200, value=_top_default, step=1, key="topk_inp")
-        
+
         pending_change = (
-            sec_to_mmss(float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))) != win_str_inp or
-            sec_to_mmss(float(st.session_state.get('SKIP_SEC', SKIP_SEC))) != skip_str_inp or
-            sec_to_mmss(float(st.session_state.get('DELTA_SEC', DELTA_SEC))) != del_str_inp or
-            int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS)) != int(topk_inp)
+            sec_to_mmss(SessionStateManager.get('WINDOW_SEC', settings.WINDOW_SEC)) != win_str_inp or
+            sec_to_mmss(SessionStateManager.get('SKIP_SEC', settings.SKIP_SEC)) != skip_str_inp or
+            sec_to_mmss(SessionStateManager.get('DELTA_SEC', settings.DELTA_SEC)) != del_str_inp or
+            int(SessionStateManager.get('TOP_VIDEOS', settings.TOP_VIDEOS)) != int(topk_inp)
         )
-        
+
         col_upd, col_reset = st.columns(2)
         if pending_change:
             update_cfg = col_upd.button("Update", type="secondary", use_container_width=True)
             reset_cfg = col_reset.button("Reset", use_container_width=True)
         else:
-            col_upd.empty()
-            col_reset.empty()
+            update_cfg = False
+            reset_cfg = False
+
         default_cfg = st.button("Default", use_container_width=True)
 
-        if 'update_cfg' in locals() and update_cfg:
-            st.session_state['WINDOW_SEC'] = parse_mmss(win_str_inp, WINDOW_SEC)
-            st.session_state['SKIP_SEC'] = parse_mmss(skip_str_inp, SKIP_SEC)
-            st.session_state['DELTA_SEC'] = parse_mmss(del_str_inp, DELTA_SEC)
-            st.session_state['TOP_VIDEOS'] = int(topk_inp)
+        if update_cfg:
+            SessionStateManager.set('WINDOW_SEC', parse_mmss(win_str_inp, settings.WINDOW_SEC))
+            SessionStateManager.set('SKIP_SEC', parse_mmss(skip_str_inp, settings.SKIP_SEC))
+            SessionStateManager.set('DELTA_SEC', parse_mmss(del_str_inp, settings.DELTA_SEC))
+            SessionStateManager.set('TOP_VIDEOS', int(topk_inp))
             st.rerun()
-        if 'reset_cfg' in locals() and reset_cfg:
-            st.session_state['pending_setting_inputs'] = {'win': sec_to_mmss(st.session_state.get('WINDOW_SEC')), 'skip': sec_to_mmss(st.session_state.get('SKIP_SEC')), 'del': sec_to_mmss(st.session_state.get('DELTA_SEC')), 'top': int(st.session_state.get('TOP_VIDEOS'))}
+
+        if reset_cfg:
+            # Reset to current session values
             st.rerun()
-        if 'default_cfg' in locals() and default_cfg:
-            st.session_state.update({'WINDOW_SEC': 40.0, 'SKIP_SEC': 0.0, 'DELTA_SEC': 20.0, 'TOP_VIDEOS': 20})
-            st.session_state['pending_setting_inputs'] = {'win': '00:40', 'skip': '00:00', 'del': '00:20', 'top': 20}
+
+        if default_cfg:
+            SessionStateManager.set('WINDOW_SEC', 40.0)
+            SessionStateManager.set('SKIP_SEC', 0.0)
+            SessionStateManager.set('DELTA_SEC', 20.0)
+            SessionStateManager.set('TOP_VIDEOS', 20)
             st.rerun()
 
     # Debug toggle
-    debug_mode = st.checkbox("🐛 Debug Mode", value=st.session_state.get("debug_mode", False))
-    st.session_state["debug_mode"] = debug_mode
+    debug_mode = st.checkbox("🐛 Debug Mode", value=SessionStateManager.get("debug_mode", False))
+    SessionStateManager.set("debug_mode", debug_mode)
 
 # ============================ SIDEBAR END =======================================
 
 st.title("Video Retrieval - CLIP + BM25 Search")
 st.markdown("*Use the sidebar to select a search mode and configure settings.*")
 
+# Mode mapping
 def _mode_key(name: str) -> str:
     return {
         "CLIP Multi-aspects Search"            : "clip",
@@ -2842,34 +772,33 @@ bm25_seed_enabled   = (search_mode == "Transcript Seed Search (BM25)")
 bm25_enabled        = (search_mode == "BM25 Keyword Search")
 video_id_enabled    = (search_mode == "Search by Video ID")
 
+# Run flag management
 def _clear_run_flags(except_mode_key: str | None = None):
     for k in list(st.session_state.keys()):
         if k.startswith("run_flag_") and (except_mode_key is None or k != f"run_flag_{except_mode_key}"):
-            st.session_state.pop(k, None)
+            SessionStateManager.delete(k)
 
 def _get_run_flag(mode_key: str) -> bool:
-    return bool(st.session_state.get(f"run_flag_{mode_key}", False))
+    return SessionStateManager.get(f"run_flag_{mode_key}", False)
 
 def _set_run_flag(mode_key: str, value: bool):
-    st.session_state[f"run_flag_{mode_key}"] = bool(value)
+    SessionStateManager.set(f"run_flag_{mode_key}", bool(value))
 
-# Reset run/caches when switching modes to prevent unintended auto-runs
+# Reset run/caches when switching modes
 if 'last_mode' not in st.session_state:
-    st.session_state['last_mode'] = search_mode
-elif st.session_state['last_mode'] != search_mode:
-    st.session_state['run_flag'] = False
-    st.session_state['auto_run_after_enhance'] = False
-    st.session_state['last_mode'] = search_mode
+    SessionStateManager.set('last_mode', search_mode)
+elif SessionStateManager.get('last_mode') != search_mode:
+    SessionStateManager.set('run_flag', False)
+    SessionStateManager.set('auto_run_after_enhance', False)
+    SessionStateManager.set('last_mode', search_mode)
 
-# Apply runtime overrides from session so settings affect ranking
-try:
-    WINDOW_SEC = float(st.session_state.get('WINDOW_SEC', WINDOW_SEC))
-    SKIP_SEC = float(st.session_state.get('SKIP_SEC', SKIP_SEC))
-    DELTA_SEC = float(st.session_state.get('DELTA_SEC', DELTA_SEC))
-    TOP_VIDEOS = int(st.session_state.get('TOP_VIDEOS', TOP_VIDEOS))
-except Exception:
-    pass
+# Apply runtime overrides from session
+WINDOW_SEC = SessionStateManager.get('WINDOW_SEC', settings.WINDOW_SEC)
+SKIP_SEC = SessionStateManager.get('SKIP_SEC', settings.SKIP_SEC)
+DELTA_SEC = SessionStateManager.get('DELTA_SEC', settings.DELTA_SEC)
+TOP_VIDEOS = SessionStateManager.get('TOP_VIDEOS', settings.TOP_VIDEOS)
 
+# Max aspects input
 max_aspects_input = st.text_input(
     "🎯 Max aspects:",
     value="",
@@ -2883,33 +812,37 @@ if (not gemini_available) and rerank_enabled:
     st.warning("⚠️ Rerank requires Gemini. Switching to basic CLIP search.")
     search_mode = "CLIP Multi-aspects Search"
     rerank_enabled = False
-    bm25_enabled = (search_mode == "BM25 Keyword Search")
+    clip_enabled = True
 
 # Rerank weight settings
 if rerank_enabled:
     with st.expander("🔧 Rerank Weight Settings", expanded=False):
         st.markdown("**Rerank Weight Settings**")
         col_w_clip, col_w_text, col_w_any, col_w_phr = st.columns(4)
-        w_clip_slider = col_w_clip.slider("w_clip", 0.0, 1.0, float(st.session_state.get('W_CLIP', 0.4)), 0.05, key="w_clip_slider")
-        w_text_slider = col_w_text.slider("w_text", 0.0, 1.0, float(st.session_state.get('W_TEXT', 0.6)), 0.05, key="w_text_slider")
-        w_any_slider = col_w_any.slider("w_any (unigram)", 0.0, 1.0, float(st.session_state.get('W_ANY', 0.3)), 0.05, key="w_any_slider")
-        w_phr_slider = col_w_phr.slider("w_phr (phrase)", 0.0, 1.0, float(st.session_state.get('W_PHR', 0.7)), 0.05, key="w_phr_slider")
-        
-        current_w_clip = st.session_state.get('W_CLIP', 0.4)
-        current_w_text = st.session_state.get('W_TEXT', 0.6)
-        current_w_any = st.session_state.get('W_ANY', 0.3)
-        current_w_phr = st.session_state.get('W_PHR', 0.7)
-        
+        w_clip_slider = col_w_clip.slider("w_clip", 0.0, 1.0, float(SessionStateManager.get('W_CLIP', 0.4)), 0.05, key="w_clip_slider")
+        w_text_slider = col_w_text.slider("w_text", 0.0, 1.0, float(SessionStateManager.get('W_TEXT', 0.6)), 0.05, key="w_text_slider")
+        w_any_slider = col_w_any.slider("w_any (unigram)", 0.0, 1.0, float(SessionStateManager.get('W_ANY', 0.3)), 0.05, key="w_any_slider")
+        w_phr_slider = col_w_phr.slider("w_phr (phrase)", 0.0, 1.0, float(SessionStateManager.get('W_PHR', 0.7)), 0.05, key="w_phr_slider")
+
+        current_w_clip = SessionStateManager.get('W_CLIP', 0.4)
+        current_w_text = SessionStateManager.get('W_TEXT', 0.6)
+        current_w_any = SessionStateManager.get('W_ANY', 0.3)
+        current_w_phr = SessionStateManager.get('W_PHR', 0.7)
+
         st.info(f"**Current Formula:** `fused = {current_w_clip}*(clip_total/num_aspects) + {current_w_text}*({current_w_any}*hits_any + {current_w_phr}*hits_phr)`")
-        
-        weights_changed = (current_w_clip != w_clip_slider or current_w_text != w_text_slider or current_w_any != w_any_slider or current_w_phr != w_phr_slider)
+
+        weights_changed = (current_w_clip != w_clip_slider or current_w_text != w_text_slider or
+                          current_w_any != w_any_slider or current_w_phr != w_phr_slider)
         if weights_changed:
             if st.button("Update Weights", type="secondary", use_container_width=True):
-                st.session_state.update({'W_CLIP': w_clip_slider, 'W_TEXT': w_text_slider, 'W_ANY': w_any_slider, 'W_PHR': w_phr_slider})
+                SessionStateManager.set('W_CLIP', w_clip_slider)
+                SessionStateManager.set('W_TEXT', w_text_slider)
+                SessionStateManager.set('W_ANY', w_any_slider)
+                SessionStateManager.set('W_PHR', w_phr_slider)
                 st.success("✅ Rerank weight settings updated!")
                 st.rerun()
 
-# BM25 options when enabled
+# BM25 options
 if bm25_enabled:
     col_help = st.columns([1])[0]
 
@@ -2960,14 +893,13 @@ if bm25_enabled:
             | `"phrase"` | `"phrase"` | `"công an"` | Exact phrase match |
             """)
 
-
-# Video ID input when enabled
+# Video ID input
 if video_id_enabled:
     st.markdown("**Video ID Search:**")
     video_id_input = st.text_input(
         "Enter Video ID:",
         placeholder="e.g., K01_V001, L02_V005",
-        help="Enter the video ID to search for (e.g., K01_V001, L02_V005)",
+        help="Enter the video ID to search for",
         key="video_id_input"
     )
 else:
@@ -2984,13 +916,14 @@ Nhấn nút "📚 BM25 Query Syntax" để xem chi tiết syntax."""
 else:
     placeholder_text = "Nhập miêu tả truy vấn tiếng Việt / English ..."
 
-# Only show query input if not in video ID mode
+# Query input
 if not video_id_enabled:
     query_vi = st.text_area("Enter Query:", height=150, placeholder=placeholder_text)
 else:
-    query_vi = ""  # Set empty query for video ID mode
+    query_vi = ""
 
-# Button styling for full width
+# Button styling
+st.markdown(create_popover_css(), unsafe_allow_html=True)
 st.markdown(
     """
     <style>
@@ -3050,66 +983,111 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Initialize session state for query enhancement
+# Initialize query enhancement state
 if 'query_enhanced' not in st.session_state:
-    st.session_state.query_enhanced = False
+    SessionStateManager.set('query_enhanced', False)
 if 'enhanced_data' not in st.session_state:
-    st.session_state["enhanced_data"] = None
+    SessionStateManager.set('enhanced_data', None)
 
-# Row 5: Query buttons - Conditional display based on search mode
-# Persist run flag across reruns so UI remains in results state
-if 'run_flag' not in st.session_state:
-    st.session_state['run_flag'] = False
-run = st.session_state['run_flag']
+# ============================ SEARCH MODE HANDLERS ============================
 
-# Check if Gemini API is configured
-gemini_configured = bool(GOOGLE_API_KEY and GOOGLE_API_KEY.strip())
-gemini_available = 'turn_off_gemini' in st.session_state and gemini_configured and (not st.session_state['turn_off_gemini'])
-
-# Auto-run once after first enhance (so buttons switch to Run/Reset immediately)
-if st.session_state.get('auto_run_after_enhance', False):
-    _set_run_flag(active_key, True)
-    st.session_state['auto_run_after_enhance'] = False
-
-# Default values for Gemini parameters (when API is not configured)
-gemini_temperature = 0.7
-gemini_top_p = 0.9
-
+# BM25 Keyword Search Mode
 if bm25_enabled:
-    # BM25 mode - always show Run Query directly (no enhancement needed)
     run_button = st.button("🚀 Run Query", width='stretch', type="primary")
     if run_button:
-        # Reset watch mode keys when starting new search
-        keys_to_reset = [key for key in st.session_state.keys() if key.startswith("watch_mode_")]
-        for key in keys_to_reset:
-            del st.session_state[key]
-            
+        reset_watch_mode_keys()
+
         if not query_vi.strip():
             st.error("Please enter a query first!")
         else:
             _set_run_flag("bm25_kw", True)
             st.info("🔍 **BM25 Keyword Search** - Searching directly by keywords")
 
+    if _get_run_flag("bm25_kw"):
+        st.markdown("---")
+        st.subheader("BM25 Search Results")
+
+        with st.spinner("🔍 Searching transcripts..."):
+            results = bm25_search_videos(query_vi, limit=50)
+
+        if results:
+            st.success(f"✅ Found {len(results)} results")
+
+            # Show results
+            for i, result in enumerate(results[:TOP_VIDEOS]):
+                vid = result['video_id']
+                timestamp = result['timestamp']
+                score = result['score']
+                highlighted_text = result.get('highlighted_full_text', result.get('full_text', ''))
+
+                with st.container():
+                    st.markdown(f"**[{i+1}] {vid}** · time: {sec_to_mmss(timestamp)} · score: {score:.3f}")
+
+                    # Show highlighted transcript
+                    if highlighted_text:
+                        st.markdown(f'<div class="bm25-fulltext">{highlighted_text}</div>', unsafe_allow_html=True)
+
+                    # Show keyframe
+                    frame_num = timestamp_to_keyframe_number(vid, timestamp)
+                    best_frame, kf_path = find_best_keyframe(vid, frame_num)
+
+                    if os.path.exists(kf_path):
+                        img = safe_imread(kf_path)
+                        if img:
+                            st.image(img, caption=f"{vid} - Frame {best_frame} @ {sec_to_mmss(timestamp)}", use_container_width=True)
+        else:
+            st.warning("No results found. Try a different query.")
+
+# Video ID Search Mode
 elif video_id_enabled:
-    # Video ID mode - always show Search Video directly (no enhancement needed)
     run_button = st.button("🔍 Search Video", width='stretch', type="primary")
     if run_button:
-        # Reset watch mode keys when starting new search
-        keys_to_reset = [key for key in st.session_state.keys() if key.startswith("watch_mode_")]
-        for key in keys_to_reset:
-            del st.session_state[key]
-            
+        reset_watch_mode_keys()
+
         if not video_id_input.strip():
             st.error("Please enter a video ID first!")
         else:
             _set_run_flag("vid", True)
             st.info("🔍 **Video ID Search** - Searching for specific video")
 
-elif bm25_seed_enabled:
-    # Transcript Seed Search mode - hỗ trợ cả Gemini và manual fallback
+    if _get_run_flag("vid"):
+        st.markdown("---")
+        st.subheader("Video ID Search Results")
+
+        vid = video_id_input.strip()
+
+        # Check if video exists
+        npy_file = npy_path_for_video(vid)
+        if os.path.exists(npy_file):
+            st.success(f"✅ Found video: {vid}")
+
+            # Load video features
+            data = load_video_features(vid)
+            if data:
+                feats, times = data
+                st.info(f"Video has {len(feats)} keyframes, duration: ~{sec_to_mmss(times[-1])}")
+
+                # Show some keyframes
+                st.markdown("**Sample Keyframes:**")
+                cols = st.columns(5)
+                for i, col in enumerate(cols):
+                    if i < len(times):
+                        frame_num = timestamp_to_keyframe_number(vid, times[i * len(times) // 5])
+                        best_frame, kf_path = find_best_keyframe(vid, frame_num)
+
+                        if os.path.exists(kf_path):
+                            img = safe_imread(kf_path)
+                            if img:
+                                with col:
+                                    st.image(img, caption=f"{sec_to_mmss(times[i * len(times) // 5])}", use_container_width=True)
+        else:
+            st.error(f"❌ Video '{vid}' not found in database.")
+
+# CLIP Multi-aspects Search (with or without Rerank)
+elif clip_enabled or rerank_enabled:
+    # Enhancement step
     if gemini_available:
-        # Khi Gemini khả dụng: Enhance trước → Run/Reset
-        if not st.session_state.query_enhanced:
+        if not SessionStateManager.get('query_enhanced', False):
             enhance_button = st.button("🌱 Enhance Query", type="primary", width='stretch')
             if enhance_button:
                 _clear_run_flags()
@@ -3119,1342 +1097,316 @@ elif bm25_seed_enabled:
                     with st.spinner("Enhancing query with Gemini..."):
                         try:
                             enhanced_data = extract_aspects_and_seeds_with_gemini(
-                                query_vi, gemini_temperature, gemini_top_p,
-                                gemini_model if 'gemini_model' in locals() else "gemini-2.5-flash",
+                                query_vi,
+                                gemini_temperature,
+                                gemini_top_p,
+                                gemini_model,
                                 max_aspects_input.strip() if max_aspects_input.strip() else "N"
                             )
-                            st.session_state["enhanced_data"] = enhanced_data
-                            st.session_state.query_enhanced = True
-                            _set_run_flag("bm25_seed", True)
+                            SessionStateManager.set('enhanced_data', enhanced_data)
+                            SessionStateManager.set('query_enhanced', True)
+                            SessionStateManager.set('auto_run_after_enhance', True)
+                            st.success("✅ Query enhanced successfully!")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"Failed to enhance query: {e}")
+                            st.error(f"Enhancement failed: {e}")
         else:
-            # Sau khi enhance: hiện Run/Reset buttons
-            c1, c2 = st.columns([1,1])
-            with c1:
-                run_button = st.button("🚀 Run Query", type="secondary", width='stretch')
-            with c2:
-                reset_button = st.button("🔄 Reset Query", width='stretch')
-            if run_button:
-                _clear_run_flags(except_mode_key="bm25_seed")
-                _set_run_flag("bm25_seed", True)
-
-            if reset_button:
-                _clear_run_flags()
-                st.session_state.query_enhanced = False
-                st.session_state["enhanced_data"] = None
-                # Clear all caches when resetting
-                st.session_state.pop('clip_cache', None)
-                st.session_state.pop('seed_cache', None)
-                st.session_state.pop('video_cache', None)
-                st.session_state.pop('rerank_cache', None)
-                st.rerun()
-    else:
-        # Khi Gemini không khả dụng: hiện Run Query trực tiếp với manual fallback
-        # Kiểm tra xem có cache cũ không
-        has_old_cache = (
-            st.session_state.query_enhanced and 
-            st.session_state.get("enhanced_data", {}).get("source") != "manual_fallback"
-        )
-        
-        if has_old_cache:
-            # Có cache cũ từ Gemini - hiện cả Run Query và Force Manual
-            col1, col2 = st.columns([1, 1])
+            # Show Run/Reset buttons
+            col1, col2 = st.columns(2)
             with col1:
-                run_button = st.button("🚀 Run Query", type="secondary", width='stretch')
-            with col2:
-                force_manual_button = st.button("🔧 Force Manual", type="primary", width='stretch')
-            
-            if run_button:
-                _clear_run_flags(except_mode_key="bm25_seed")
-                _set_run_flag("bm25_seed", True)
-            
-            if force_manual_button:
-                _clear_run_flags()
-                if not query_vi.strip():
-                    st.error("Please enter a query first!")
-                else:
-                    with st.spinner("Creating seeds manually..."):
-                        try:
-                            # Tạo enhanced_data mới với manual fallback
-                            enhanced_data = create_fallback_enhanced_data(query_vi)
-                            # Don't cache fallback data - only cache Gemini results
-                            # Use enhanced_data temporarily but don't persist it
-                            _set_run_flag("bm25_seed", True)
-                            st.info("🔧 **Using Manual Seed Extraction** - Seeds created from query analysis")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to create manual seeds: {e}")
-        else:
-            # Không có cache cũ - hiện Run Query trực tiếp
-            run_button = st.button("🚀 Run Query", type="primary", width='stretch')
-            if run_button:
-                _clear_run_flags()
-                if not query_vi.strip():
-                    st.error("Please enter a query first!")
-                else:
-                    with st.spinner("Creating seeds manually..."):
-                        try:
-                            # Luôn tạo enhanced_data mới khi Gemini tắt (không sử dụng cache cũ)
-                            enhanced_data = create_fallback_enhanced_data(query_vi)
-                            # Don't cache fallback data - only cache Gemini results
-                            # Use enhanced_data temporarily but don't persist it
-                            _set_run_flag("bm25_seed", True)
-                            st.info("🔧 **Using Manual Seed Extraction** - Seeds created from query analysis")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to create manual seeds: {e}")
+                run_button = st.button("🚀 Run Search", type="primary", use_container_width=True)
+                if run_button:
+                    reset_watch_mode_keys()
+                    _set_run_flag(active_key, True)
 
-elif gemini_available:
-    # CLIP mode with Gemini - show Enhance Query first, then Run Query
-    if not st.session_state.query_enhanced:
-        # Show Enhance Query button (Green, full width)
-        enhance_button = st.button("🌱 Enhance Query", width='stretch', type="primary")
-        if enhance_button:
-            # Reset watch mode keys when starting new search
-            keys_to_reset = [key for key in st.session_state.keys() if key.startswith("watch_mode_")]
-            for key in keys_to_reset:
-                del st.session_state[key]
-                
+            with col2:
+                reset_button = st.button("🔄 Reset", use_container_width=True)
+                if reset_button:
+                    SessionStateManager.set('query_enhanced', False)
+                    SessionStateManager.set('enhanced_data', None)
+                    _clear_run_flags()
+                    st.rerun()
+    else:
+        # No Gemini - direct run
+        run_button = st.button("🚀 Run Search", type="primary", width='stretch')
+        if run_button:
+            reset_watch_mode_keys()
             if not query_vi.strip():
                 st.error("Please enter a query first!")
             else:
-                with st.spinner("Enhancing query with Gemini..."):
-                    try:
-                        enhanced_data = extract_aspects_and_seeds_with_gemini(
-                            query_vi, gemini_temperature, gemini_top_p,
-                            gemini_model if 'gemini_model' in locals() else "gemini-2.5-flash",
-                            max_aspects_input.strip() if max_aspects_input.strip() else "N"
-                        )
-                        st.session_state["enhanced_data"] = enhanced_data
-                        st.session_state.query_enhanced = True
-                        st.success("✅ Query enhanced successfully! Running search...")
-                        # Trigger a rerun where Run/Reset buttons show and auto-run executes once
-                        st.session_state['auto_run_after_enhance'] = True
-                        _set_run_flag("clip", True)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Failed to enhance query: {e}")
-    else:
-        # After enhancement: show Run and Reset so user can reuse aspects/seeds for rerank later
-        cols_rr = st.columns([1, 1])
-        with cols_rr[0]:
-            run_button = st.button("🚀 Run Query", width='stretch', type="secondary")
-        with cols_rr[1]:
-            reset_button = st.button("🔄 Reset Query", width='stretch')
+                # Use fallback enhancement
+                with st.spinner("Preparing search..."):
+                    enhanced_data = create_fallback_enhanced_data(query_vi)
+                    SessionStateManager.set('enhanced_data', enhanced_data)
+                _set_run_flag(active_key, True)
 
-        if run_button:
-            # Reset watch mode keys when starting new search
-            keys_to_reset = [key for key in st.session_state.keys() if key.startswith("watch_mode_")]
-            for key in keys_to_reset:
-                del st.session_state[key]
-                
-            _set_run_flag("clip", True)
-            
-            # Auto-rerank logic: If rerank mode is enabled and CLIP cache exists, also set rerank flag
-            if rerank_enabled and st.session_state.get("clip_cache"):
-                if st.session_state.get("debug_mode"):
-                    st.write(f"🔍 Debug - Auto-setting rerank flag (Run Query with rerank mode enabled)")
-                _set_run_flag("rerank", True)
-            
-            st.rerun()
-        if reset_button:
-            st.session_state.query_enhanced = False
-            st.session_state["enhanced_data"] = None
-            _clear_run_flags()
-            # Clear all caches when resetting
-            st.session_state.pop('clip_cache', None)
-            st.session_state.pop('seed_cache', None)
-            st.session_state.pop('video_cache', None)
-            st.session_state.pop('rerank_cache', None)
-            st.rerun()
-else:
-    # CLIP mode without Gemini - show Run Query directly with fallback
-    run_button = st.button("🚀 Run Query", width='stretch', type="primary")
-    if run_button:
-        # Reset watch mode keys when starting new search
-        keys_to_reset = [key for key in st.session_state.keys() if key.startswith("watch_mode_")]
-        for key in keys_to_reset:
-            del st.session_state[key]
-            
-        if not query_vi.strip():
-            st.error("Please enter a query first!")
-        else:
-            # Clear any cached enhanced_data to prevent fallback caching
-            st.session_state.query_enhanced = False
-            st.session_state["enhanced_data"] = None
-            st.session_state.pop('clip_cache', None)
-            
-            _set_run_flag("clip", True)
-            
-            # Auto-rerank logic: If rerank mode is enabled and CLIP cache exists, also set rerank flag
-            if rerank_enabled and st.session_state.get("clip_cache"):
-                if st.session_state.get("debug_mode"):
-                    st.write(f"🔍 Debug - Auto-setting rerank flag (Run Query with rerank mode enabled)")
-                _set_run_flag("rerank", True)
-            
-            # Use fallback translation directly
-            st.info("ℹ️ **Using Fallback Translation** - Configure Gemini API for better results")
-            st.rerun()
+    # Execute search if run flag is set
+    if _get_run_flag(active_key):
+        st.markdown("---")
 
-# Row 5: Logs expander
-log_exp = st.expander("📝 Logs", expanded=False)
-log_container = log_exp.empty()
-
-def run_with_logs(fn, *args, **kwargs):
-    buf = io.StringIO()
-    try:
-        import contextlib
-        with contextlib.redirect_stdout(buf):
-            result = fn(*args, **kwargs)
-            print(f"[RUN_LOGS] Function {fn.__name__} completed successfully, result type: {type(result)}")
-            if result is None:
-                print(f"[RUN_LOGS] WARNING: Function {fn.__name__} returned None!")
-            return result, buf
-    except Exception as e:
-        print(f"[ERROR] {fn.__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        # Don't return None - let the exception propagate
-        raise e
-    finally:
-        pass
-
-# Row 8 & 9: Results areas (placeholders)
-clip_results_container = st.empty()
-rerank_results_container = st.empty()
-
-# (Dynamic sidebar for sorting will be rendered after results are available in CLIP mode only)
-run = _get_run_flag(active_key)
-
-# Debug: Show current run flags
-if st.session_state.get("debug_mode", False):
-    st.write(f"🔍 Debug - Active key: {active_key}, Run flag: {run}")
-    st.write(f"🔍 Debug - All run flags: {[k for k in st.session_state.keys() if k.startswith('run_flag_')]}")
-
-# Smart cache clearing based on mode and data source (always run, not just when run=True)
-if st.session_state.get("debug_mode"):
-    st.write(f"🔍 Debug - Active key: {active_key}")
-
-# For Rerank mode: Auto-run rerank when switching to rerank mode if CLIP cache exists
-if active_key == "rerank" and st.session_state.get("clip_cache") and not st.session_state.get("rerank_cache"):
-    if st.session_state.get("debug_mode"):
-        st.write(f"🔍 Debug - Auto-running rerank (switching to rerank mode with CLIP cache)")
-    _set_run_flag("rerank", True)
-
-# For CLIP modes (CLIP, CLIP+Rerank): Only clear when explicitly requested (Reset button)
-# Don't clear CLIP cache when switching between CLIP modes
-if active_key not in ["clip", "rerank"]:
-    if debug_mode:
-        st.write(f"🔍 Debug - Clearing CLIP cache (switching away from CLIP modes)")
-        st.write(f"🔍 Debug - CLIP cache before clearing: {bool(st.session_state.get('clip_cache'))}")
-    st.session_state.pop('clip_cache', None)
-    if debug_mode:
-        st.write(f"🔍 Debug - CLIP cache after clearing: {bool(st.session_state.get('clip_cache'))}")
-else:
-    if debug_mode:
-        st.write(f"🔍 Debug - Preserving CLIP cache (staying in CLIP modes)")
-        st.write(f"🔍 Debug - CLIP cache exists: {bool(st.session_state.get('clip_cache'))}")
-
-# For Transcript Seed Search: Only clear when explicitly requested (Reset button)
-if active_key != "bm25_seed":
-    if debug_mode:
-        st.write(f"🔍 Debug - Clearing Seed cache (switching away from Transcript Seed)")
-    st.session_state.pop('seed_cache', None)
-
-# For Rerank: Only clear when switching away from CLIP modes (CLIP and CLIP+Rerank share cache)
-if active_key not in ["clip", "rerank"]:
-    if debug_mode:
-        st.write(f"🔍 Debug - Clearing Rerank cache (switching away from CLIP modes)")
-    st.session_state.pop('rerank_cache', None)
-
-# Smart clearing for enhanced_data based on source
-if st.session_state.get('enhanced_data'):
-    enhanced_source = st.session_state['enhanced_data'].get('source', 'unknown')
-    if debug_mode:
-        st.write(f"🔍 Debug - Enhanced data source: {enhanced_source}")
-    
-    # Clear fallback/manual data when switching modes
-    if enhanced_source in ['manual_fallback', 'fallback']:
-        if debug_mode:
-            st.write(f"🔍 Debug - Clearing fallback enhanced_data (source: {enhanced_source})")
-        st.session_state.pop('enhanced_data', None)
-        st.session_state.pop('query_enhanced', None)
-    # Keep Gemini data when switching modes (flexible usage)
-    elif enhanced_source == 'gemini':
-        if debug_mode:
-            st.write(f"🔍 Debug - Preserving Gemini enhanced_data (source: {enhanced_source})")
-    else:
-        if debug_mode:
-            st.write(f"🔍 Debug - Unknown enhanced_data source: {enhanced_source}, clearing")
-        st.session_state.pop('enhanced_data', None)
-        st.session_state.pop('query_enhanced', None)
-
-if run:
-    
-    # Check if BM25 search is enabled
-    if bm25_enabled:
-        # BM25 Keyword Search Mode
-        with log_container.container():
-            st.text("🔍 Running BM25 keyword search...")
-
-        # BM25 Keyword Search - No caching, always run fresh search
-        try:
-            with st.spinner("🔎 Đang search BM25..."):
-                bm25_results = bm25_search_videos(query_vi, limit=TOP_VIDEOS)
-
-                # Apply search filters
-                bm25_results = apply_search_filters(bm25_results, exclude_series_list, exclude_videos_list)
-
-                # Remove duplicate results that are too close in time
-                bm25_results = deduplicate_bm25_results(bm25_results, time_threshold=30.0)
-
-                # Highlight is always enabled for BM25 results
-                with log_container.container():
-                    st.text("🔍 Running BM25 keyword search...")
-                    st.text(f"Found {len(bm25_results)} results")
-
-        except Exception as e:
-            st.error(f"BM25 search failed: {e}")
-            st.info("Make sure BM25 databases exist in the data directory")
+        enhanced_data = SessionStateManager.get('enhanced_data')
+        if not enhanced_data:
+            st.error("No enhanced data available. Please enhance query first.")
             st.stop()
 
-        if bm25_results:
-            # Display BM25 results
-            with clip_results_container.container():
-                st.subheader("🔍 BM25 Keyword Search Results")
+        ASPECTS = enhanced_data.get('aspects', [])
+        SEEDS = enhanced_data.get('seeds', {})
 
-                for i, result in enumerate(bm25_results):
-                    vid = result["video_id"]
-                    score = result["score"]
-                    snippet = result["snippet"]
-                    timestamp = result["timestamp"]
-
-                    with st.container():
-                        # Header with keyframe
-                        col_img, col_info = st.columns([1, 3])
-
-                        with col_img:
-                            # Find keyframe closest to timestamp
-                            target_keyframe = timestamp_to_keyframe_number(vid, timestamp)
-                            keyframe_img, actual_frame = find_best_keyframe(vid, target_keyframe)
-
-                            if keyframe_img is not None and keyframe_img.size[0] > 100:
-                                st.image(keyframe_img, caption=f"Keyframe {actual_frame}", width='stretch')
-                            else:
-                                # Fallback image if keyframe not found
-                                fallback_img = Image.fromarray(np.full((180, 320, 3), 200, dtype=np.uint8))
-                                st.image(fallback_img, caption=f"No keyframe at ~{sec_to_mmss(timestamp)}", width='stretch')
-
-                        with col_info:
-                            st.markdown(f"**[{i+1}] {vid}** · BM25 Score: {score:.3f}")
-                            st.markdown(f"**Timestamp:** {sec_to_mmss(timestamp)} | **Keyframe:** {actual_frame}")
-                            st.markdown(f"**Source:** {result['db_source'].upper()}")
-
-                            # Display highlighted full text
-                            highlighted_text = result.get("highlighted_full_text", snippet)
-                            st.markdown(f"""
-                                <div class="bm25-fulltext">
-                                    <strong>Full Text:</strong> {highlighted_text}
-                                </div>
-                            """, unsafe_allow_html=True)
-
-                    # Try to get watch URL and display video player
-                    url = get_watch_url(vid)
-                    if url:
-                        with st.popover("🎥 Watch Video", width='stretch'):
-                            st.markdown(create_popover_css(), unsafe_allow_html=True)
-                            col1, col2 = st.columns([2, 1]) # Căn lề radio qua phải
-                            with col1:
-                                st.markdown("")  # Cột trống để đẩy sang phải
-                            with col2:
-                                # Danh sách các lựa chọn (giữ logic đơn giản)
-                                options = ("Youtube Online", "Kaggle Offline")
-                                
-                                # Hàm để định dạng cách hiển thị (thêm icon)
-                                def format_func(option):
-                                    if option == "Youtube Online":
-                                        return f"▶️ {option}"
-                                    elif option == "Kaggle Offline":
-                                        return f"☁️ {option}"
-                                    return option
-
-                                watch_mode = st.radio(
-                                    "Watch Mode Select",
-                                    options,
-                                    key=f"watch_mode_bm25_{vid}_{i}",
-                                    horizontal=True,
-                                    label_visibility="collapsed",
-                                    format_func=format_func
-                                )
-
-                            start_sec = int(max(0, timestamp))
-                            actual_video_id = vid
-                            actual_fps = get_fps_from_csv(actual_video_id)
-                            
-                            if watch_mode == "Youtube Online":
-                                url = get_watch_url(vid)
-                                if url:
-                                    youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
-                                    components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
-                                else:
-                                    st.warning("YouTube URL not found for this video. Try Kaggle Offline mode.")
-                            
-                            elif watch_mode == "Kaggle Offline":
-                                # Chỉ cần một placeholder duy nhất cho spinner và các thông báo
-                                status_placeholder = st.empty()
-                                
-                                local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
-                                
-                                if local_path:
-                                    file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
-                                    components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
-                                else:
-                                    # Error message is already shown by the download function
-                                    pass
-                    else:
-                        st.markdown("No video URL available")
-
-                    st.divider()
-        else:
-            st.warning("No BM25 search results found. Try different keywords or check if BM25 databases exist.")
-
-        # Don't continue with CLIP search when BM25 is enabled
-        st.stop()
-
-    elif bm25_seed_enabled:
-        with log_container.container():
-            st.text("🌱 Running Transcript Seed Search (BM25)...")
-            if debug_mode:
-                st.write(f"🔍 Debug - BM25 Seed enabled: {bm25_seed_enabled}")
-                st.write(f"🔍 Debug - Active key: {active_key}")
-            
-            # Get enhanced_data - use cached Gemini data or create temporary fallback
-            enhanced_data = st.session_state.get("enhanced_data")
-            if not enhanced_data:
-                # Create temporary fallback data when Gemini is off
-                enhanced_data = create_fallback_enhanced_data(query_vi)
-            
-            source = enhanced_data.get("source", "unknown")
-            
-            # Kiểm tra xem có đang sử dụng cache cũ không
-            if source == "manual_fallback":
-                st.text("🔧 Using Manual Seed Extraction (Gemini disabled)")
-            elif source == "gemini":
-                st.text("🌱 Using Transcript Seeds from Gemini (BM25 over both batches)...")
-            else:
-                st.text("🌱 Using Transcript Seeds (BM25 over both batches)...")
-            
-            # Cảnh báo nếu đang sử dụng cache cũ khi Gemini tắt
-            if not gemini_available and source != "manual_fallback":
-                st.warning("⚠️ Using cached Gemini data. Click 'Reset Query' to use manual extraction.")
-            
-            # Hiển thị thông tin seeds
-            seeds_info = enhanced_data.get("seeds", {})
-            unigrams_count = len(seeds_info.get("unigrams", []))
-            phrases_count = len(seeds_info.get("phrases", []))
-            st.text(f"📊 Seeds: {unigrams_count} unigrams, {phrases_count} phrases")
-
-        SEEDS = enhanced_data.get("seeds", {})
-        if not SEEDS:
-            st.error("Seeds are missing. Please click **Enhance Query** first.")
+        if not ASPECTS:
+            st.error("No aspects found in enhanced data.")
             st.stop()
 
-        # Build cache key for Transcript Seed Search results
-        try:
-            seed_cache_key = json.dumps({
-                "seeds": SEEDS,
-                "top_videos": TOP_VIDEOS,
-                "window_sec": WINDOW_SEC,
-                "stride_sec": DELTA_SEC,
-                "limit_videos": LIMIT_VIDEOS,
-                "exclude_series": EXCLUDE_SER,
-                "source": enhanced_data.get("source", "unknown")
-            }, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            seed_cache_key = None
+        # Display aspects
+        st.subheader("Search Aspects")
+        aspect_names = [a['name'] for a in ASPECTS]
+        for i, aspect in enumerate(ASPECTS):
+            with st.expander(f"**{i+1}. {aspect['name']}** (weight: {aspect.get('weight', 1.0)})"):
+                st.write("**Prompts:**")
+                for prompt in aspect.get('prompts', []):
+                    st.write(f"- {prompt}")
 
-        # Check cache
-        seed_cache_hit = bool(st.session_state.get("seed_cache") and st.session_state["seed_cache"].get("key") == seed_cache_key)
-        
-        if seed_cache_hit:
-            if debug_mode:
-                st.write(f"🔍 Debug - Using cached Transcript Seed results")
-            seed_results = st.session_state["seed_cache"]["results"]
-        else:
-            try:
-                with st.spinner("🔎 Searching BM25 (seed windows across videos)..."):
-                    seed_results = transcript_seed_bm25_search(
-                        enhanced_data,
-                        top_videos=TOP_VIDEOS,
-                        window_sec=WINDOW_SEC,
-                        stride_sec=DELTA_SEC,
-                        limit_videos=LIMIT_VIDEOS,
-                        exclude_series=EXCLUDE_SER,
-                    )
-                    
-                    # Save cache
-                    try:
-                        st.session_state["seed_cache"] = {
-                            "key": seed_cache_key,
-                            "results": seed_results
-                        }
-                    except Exception:
-                        pass
-            except Exception as e:
-                st.error(f"Seed BM25 search failed: {e}")
-                st.stop()
+        # Run CLIP search
+        with st.spinner("🔍 Searching with CLIP..."):
+            query_texts = []
+            weights = []
+            for aspect in ASPECTS:
+                for prompt in aspect.get('prompts', []):
+                    query_texts.append(prompt)
+                    weights.append(aspect.get('weight', 1.0))
 
-        # Hiển thị kết quả (layout mượn của CLIP grid tối giản + popover Watch Mode)
-        with clip_results_container.container():
-            st.subheader("🌱 Transcript Seed (BM25) Results")
-            
-            # Expander để hiển thị chi tiết seeds
-            with st.expander("🔍 View Generated Seeds", expanded=False):
-                seeds_info = enhanced_data.get("seeds", {})
-                aspects_info = enhanced_data.get("aspects", [])
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Unigrams:**")
-                    unigrams = seeds_info.get("unigrams", [])
-                    if unigrams:
-                        for i, unigram in enumerate(unigrams, 1):
-                            st.text(f"{i}. {unigram}")
-                    else:
-                        st.text("No unigrams generated")
-                
-                with col2:
-                    st.markdown("**Phrases:**")
-                    phrases = seeds_info.get("phrases", [])
-                    if phrases:
-                        for i, phrase in enumerate(phrases, 1):
-                            st.text(f"{i}. {phrase}")
-                    else:
-                        st.text("No phrases generated")
-                
-                if aspects_info:
-                    st.markdown("**Aspects:**")
-                    for i, aspect in enumerate(aspects_info, 1):
-                        st.text(f"{i}. {aspect.get('name', 'Unknown')} (weight: {aspect.get('weight', 1.0)})")
-                        prompts = aspect.get('prompts', [])
-                        for j, prompt in enumerate(prompts, 1):
-                            st.text(f"   {j}. {prompt}")
-
-            if not seed_results:
-                st.info("No candidates from seed windows. Try Enhance again or relax filters.")
-            else:
-                rows = min(TOP_VIDEOS, len(seed_results))
-                for i in range(rows):
-                    r = seed_results[i]
-                    vid = r["video_id"]
-                    t0s, t1s = sec_to_mmss(r["t0"]), sec_to_mmss(r["t1"])
-                    t_mid = 0.5 * (r["t0"] + r["t1"])
-
-                    with st.container():
-                        st.markdown(f"**[{i+1}] {vid}** · window: {t0s} → {t1s} · score={r.get('score', 0):.3f}")
-
-                        # Lấy seeds để highlight
-                        seeds_info = enhanced_data.get("seeds", {})
-                        
-                        # Layout mới: Frame triplet ở trái, Transcript snippets ở phải
-                        col_left, col_right = st.columns([1, 2])
-                        
-                        with col_left:
-                            # 1. Frame Triplet
-                            st.markdown("**🎬 Frame Triplet:**")
-                            frames = get_frame_triplet(vid, t_mid, delta=10.0)
-                            
-                            if frames:
-                                for frame in frames:
-                                    if frame["image"] is not None:
-                                        st.image(frame["image"], caption=f"{frame['label']} (Frame {frame['frame_number']})", width='stretch')
-                                    else:
-                                        st.info(f"No frame at {frame['label']}")
-                            else:
-                                st.info("No frames available.")
-                        
-                        with col_right:
-                            # 2. Matched Transcript Snippets
-                            st.markdown("**📝 Matched Transcript Snippets:**")
-                            snippets = get_transcript_snippets_with_highlights(vid, r["t0"], r["t1"], seeds_info, top_n=3)
-                            
-                            if snippets:
-                                for j, snippet in enumerate(snippets, 1):
-                                    st.markdown(f"**{j}.** `{sec_to_mmss(snippet['timestamp'])}`")
-                                    # Thêm nền trắng cho transcript snippet
-                                    st.markdown(f"""
-                                    <div style="background-color: white; padding: 10px; border-radius: 5px; border: 1px solid #ddd; margin: 5px 0; color: black;">
-                                        {snippet["text"]}
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                                    st.markdown("---")
-                            else:
-                                st.info("No transcript snippets found in this window.")
-                        
-                        # Metadata info
-                        target_keyframe = timestamp_to_keyframe_number(vid, t_mid)
-                        keyframe_img, actual_frame = find_best_keyframe(vid, target_keyframe)
-                        st.markdown(f"**Metadata:** `Timestamp (mid): {sec_to_mmss(t_mid)} | Keyframe: {actual_frame}`")
-                        st.markdown(f"**Batch:** {r.get('batch','?').upper()} | **WindowSec={WINDOW_SEC} | Stride={DELTA_SEC}`")
-
-                    # Popover Watch Video (giữ UI giống các mode khác, radio ở góc phải)
-                    url = get_watch_url(vid)
-                    with st.popover("🎥 Watch Video", width='stretch'):
-                        # Reuse radio control như BM25 Keyword/CLIP
-                        col1, col2 = st.columns([2,1])
-                        with col1: st.markdown("")
-                        with col2:
-                            options = ("Youtube Online", "Kaggle Offline")
-                            def format_func(option):
-                                return f"▶️ {option}" if option=="Youtube Online" else (f"☁️ {option}" if option=="Kaggle Offline" else option)
-                            watch_mode = st.radio(
-                                "Watch Mode Select",
-                                options,
-                                key=f"watch_mode_seed_{vid}_{i}",
-                                horizontal=True,
-                                label_visibility="collapsed",
-                                format_func=format_func
-                            )
-
-                        start_sec = int(max(0, r["t0"]))
-                        actual_video_id = vid
-                        actual_fps = get_fps_from_csv(actual_video_id)
-                        
-                        if watch_mode == "Youtube Online":
-                            if url:
-                                youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
-                                components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
-                            else:
-                                st.warning(f"YouTube URL not found for {actual_video_id}. Try Kaggle Offline mode.")
-
-                        elif watch_mode == "Kaggle Offline":
-                            status_placeholder = st.empty()
-                            
-                            local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
-                            
-                            if local_path:
-                                file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
-                                components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
-                            else:
-                                # Error message is already shown by the download function
-                                pass
-                    st.divider()
-
-    # Video ID Search Mode
-    elif video_id_enabled:
-        if not video_id_input.strip():
-            st.error("Please enter a video ID first!")
-        else:
-            with log_container.container():
-                st.text(f"🔍 Searching for video ID: {video_id_input}")
-            
-            # No cache for Video ID Search - always fetch fresh data
-            try:
-                with st.spinner(f"🔎 Searching for video {video_id_input}..."):
-                    video_info = get_video_info(video_id_input)
-                    
-                    if video_info:
-                        st.success(f"✅ Found video: {video_id_input}")
-                        st.markdown("### 📹 Video Information")
-                        col_thumb, col_info = st.columns([0.3, 1])
-                        
-                        with col_thumb:
-                            if 'thumbnail_url' in video_info and video_info['thumbnail_url']:
-                                st.image(video_info['thumbnail_url'], caption="Video Thumbnail", width=400)
-                            else:
-                                st.markdown("*No thumbnail available*")
-                        
-                        with col_info:
-                            if 'title' in video_info: st.markdown(f"**Title:** {video_info['title']}")
-                            if 'author' in video_info: st.markdown(f"**Author:** {video_info['author']}")
-                            if 'length' in video_info:
-                                length_seconds = int(video_info['length'])
-                                minutes, seconds = divmod(length_seconds, 60)
-                                st.markdown(f"**Length:** {minutes:02d}:{seconds:02d}")
-                            if 'publish_date' in video_info: st.markdown(f"**Publish Date:** {video_info['publish_date']}")
-                        
-                        # --- CORRECTED VIDEO PLAYER LOGIC FOR VIDEO ID SEARCH ---
-                        st.markdown("### 🎥 Video Player")
-                        with st.popover("🎥 Watch Video", width='stretch'):
-                            st.markdown(create_popover_css(), unsafe_allow_html=True)
-                            col1, col2 = st.columns([2, 1]) # Căn lề radio qua phải
-                            with col1:
-                                st.markdown("")  # Cột trống để đẩy sang phải
-                            with col2:
-                                options = ("Youtube Online", "Kaggle Offline")
-                                def format_func(option):
-                                    if option == "Youtube Online":
-                                        return f"▶️ {option}"
-                                    elif option == "Kaggle Offline":
-                                        return f"☁️ {option}"
-                                    return option
-
-                                watch_mode = st.radio(
-                                    "Watch Mode Select",
-                                    options,
-                                    key=f"watch_mode_video_id_{video_id_input}",
-                                    horizontal=True,
-                                    label_visibility="collapsed",
-                                    format_func=format_func
-                                )
-
-                            start_sec = 0
-                            actual_video_id = video_id_input
-                            actual_fps = get_fps_from_csv(actual_video_id)
-                            
-                            if watch_mode == "Youtube Online":
-                                url = get_watch_url(actual_video_id)
-                                if url:
-                                    youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
-                                    components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
-                                else:
-                                    st.warning(f"YouTube URL not found for {actual_video_id}. Try Kaggle Offline mode.")
-
-                            elif watch_mode == "Kaggle Offline":
-                                print(f"[Video ID Search] Switching to Kaggle Offline mode for video: {actual_video_id}")
-                                status_placeholder = st.empty()
-                                
-                                local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
-                                
-                                print(f"[Video ID Search] Download result: {local_path}")
-                                if local_path:
-                                    file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
-                                    print(f"[Video ID Search] Creating local player with URL: {file_url}")
-                                    components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
-                                else:
-                                    print(f"[Video ID Search] No local path returned, download may have failed")
-                                    st.error(f"Failed to download video {actual_video_id}")
-                        
-                        if 'description' in video_info:
-                            st.markdown("### 📝 Description")
-                            st.markdown(video_info['description'])
-                        
-                        if 'keywords' in video_info and video_info['keywords']:
-                            st.markdown("### 🏷️ Keywords")
-                            st.markdown(", ".join(video_info['keywords']))
-                        
-                        if 'channel_url' in video_info:
-                            st.markdown(f"### 🔗 Channel URL: {video_info['channel_url']}")
-                        
-                    else:
-                        st.error(f"❌ Video ID '{video_id_input}' not found in media-info files")
-                        
-            except Exception as e:
-                st.error(f"Video ID search failed: {e}")
-            
-        st.stop()
-
-    # Prefer cached enhanced data if available
-    if st.session_state.get("enhanced_data"):
-        spec = st.session_state.get("enhanced_data")
-        if spec.get("source") == "gemini":
-            gemini_log = "Query enhanced successfully with Gemini API (cached)"
-        else:
-            err = spec.get("error", "")
-            gemini_log = f"Query enhance failed — using fallback translation (cached){' | error: ' + err if err else ''}"
-    elif gemini_available:
-        # No cached enhancement; call Gemini normally
-        with log_container.container():
-            st.text("Running extract_aspects_and_seeds_with_gemini() ...")
-        (spec, buf) = run_with_logs(
-            extract_aspects_and_seeds_with_gemini,
-            query_vi, gemini_temperature, gemini_top_p,
-            gemini_model if 'gemini_model' in locals() else "gemini-2.5-flash",
-            max_aspects_input.strip() if max_aspects_input.strip() else "N"
-        )
-        if spec is None:
-            st.error("Failed to extract aspects/seeds. See logs.")
-            st.stop()
-        if spec.get("source") == "gemini":
-            gemini_log = "Query enhanced successfully with Gemini API"
-        else:
-            err = spec.get("error", "")
-            gemini_log = f"Query enhance failed — using fallback translation{' | error: ' + err if err else ''}"
-    else:
-        # Gemini is turned off or not available: force fallback
-        if rerank_enabled:
-            st.warning("⚠️ Rerank not available when Gemini is turned off. Running basic CLIP search.")
-            rerank_enabled = False
-        with log_container.container():
-            st.text("Using fallback translation method...")
-        aspects, seeds = fallback_translate_and_create_aspects(query_vi)
-        spec = {"aspects": aspects, "seeds": seeds}
-        gemini_log = "Using fallback translation method (Gemini off or not configured)"
-        
-        # Don't cache fallback data - only cache Gemini results
-        # Clear any existing enhanced_data to prevent fallback caching
-        st.session_state.query_enhanced = False
-        st.session_state["enhanced_data"] = None
-
-    # Show Gemini call result first
-    with log_container.container():
-        st.text(gemini_log)
-    
-    # Then show the extracted aspects
-    ASPECTS = spec.get("aspects", [])
-    SEEDS = spec.get("seeds", {})
-    _aspect_lines = ["Aspects:"]
-    for a in ASPECTS:
-        aspect_name = a.get('name', 'unnamed')
-        weight = float(a.get('weight', 1.0))
-        prompts = a.get('prompts', [])
-        _aspect_lines.append(f"- **Aspect: {aspect_name}** (w={weight:.2f})")
-        for prompt in prompts:
-            _aspect_lines.append(f"  + Prompt: {prompt}")
-    
-    # Add seeds display
-    _aspect_lines.append("\nSeeds:")
-    unigrams = SEEDS.get("unigrams", [])
-    phrases = SEEDS.get("phrases", [])
-    if unigrams:
-        _aspect_lines.append(f"- Unigrams ({len(unigrams)}): {', '.join(unigrams[:10])}{'...' if len(unigrams) > 10 else ''}")
-    if phrases:
-        _aspect_lines.append(f"- Phrases ({len(phrases)}): {', '.join(phrases[:5])}{'...' if len(phrases) > 5 else ''}")
-    
-    _aspects_header = "\n".join(_aspect_lines)
-    
-    # Check if using fallback and show notification
-    if "fallback" in gemini_log.lower() or "translation" in gemini_log.lower():
-        st.warning("⚠️ **Using Fallback Translation Method**")
-        st.info("🔍 **Note:** When using fallback translation, transcript rerank may not work optimally as it relies on Vietnamese seeds for better matching.")
-    
-    # Display Gemini call and aspects
-    def update_log():
-        with log_container.container():
-            st.text(gemini_log)
-            st.markdown(_aspects_header)
-    
-    update_log()
-
-    # 1) CLIP rank (only if in CLIP mode and run_flag_clip or cache already available)
-    if not (clip_enabled or rerank_enabled):
-        if debug_mode:
-            st.write(f"🔍 Debug - Not in CLIP mode. CLIP enabled: {clip_enabled}, Rerank enabled: {rerank_enabled}")
-        st.stop()
-        
-    run_flag_clip = _get_run_flag("clip")
-    has_cache = bool(st.session_state.get('clip_cache'))
-    
-    if debug_mode:
-        st.write(f"🔍 Debug - CLIP mode: {clip_enabled or rerank_enabled}, Rerank: {rerank_enabled}, Run flag: {run_flag_clip}, Cache: {has_cache}")
-    
-    if not run_flag_clip and not has_cache:
-        if debug_mode:
-            st.write(f"🔍 Debug - Stopping: No run flag and no cache")
-        st.stop()
-    clip_dirs = []
-    if "b1" in DATASETS: clip_dirs.append(B1["clip_dir"])
-    if "b2" in DATASETS: clip_dirs.append(B2["clip_dir"])
-    print_msg = f"[Rank] DATASETS={DATASETS} | clip_dirs={clip_dirs} | window={WINDOW_SEC}s | skip={SKIP_SEC}s"
-    # Build a cache key based on aspects + runtime filters to avoid recomputation when sorting
-    try:
-        cache_key = json.dumps({
-            "aspects": ASPECTS,
-            "datasets": sorted(list(DATASETS)),
-            "window": WINDOW_SEC,
-            "skip": SKIP_SEC,
-            "exclude_series": exclude_series_list,
-            "exclude_videos": exclude_videos_list,
-        }, ensure_ascii=False, sort_keys=True)
-    except Exception:
-        cache_key = None
-
-    cache_hit = bool(st.session_state.get("clip_cache") and st.session_state["clip_cache"].get("key") == cache_key)
-    if cache_hit:
-        buf2 = io.StringIO("[CACHE] Using cached CLIP results for interactive sorting\n")
-        results = st.session_state["clip_cache"]["results"]
-        aspect_names = st.session_state["clip_cache"].get("aspect_names", [])
-        aspect_weights = st.session_state["clip_cache"].get("aspect_weights", [1.0]*len(aspect_names))
-    else:
-        if debug_mode:
-            st.write(f"🔍 Debug - Running CLIP search with {len(ASPECTS)} aspects")
-            st.write(f"🔍 Debug - ASPECTS: {ASPECTS}")
-        
-        with st.spinner("🎬 Đang chạy CLIP search..."):
-            (rank_out, buf2) = run_with_logs(
-                rank_videos_clip_window,
-                ASPECTS,
-                LIMIT_VIDEOS,
-                WINDOW_SEC,
+            results = multi_query_search(
+                query_texts,
+                weights,
                 SKIP_SEC,
-                None,
-                EXCLUDE_SER,
-                None,
-                None,
-                None,
-                None,
+                WINDOW_SEC,
+                TOP_VIDEOS * 3,  # Get more candidates for reranking
+                exclude_videos_list if exclude_videos_list else None
             )
-        if rank_out is None:
-            st.error("Ranking failed. See logs.")
+
+        if not results:
+            st.warning("No results found.")
             st.stop()
-        (results, aspect_names, aspect_weights) = rank_out
-        # Save cache for subsequent sidebar sorting reruns
-        try:
-            st.session_state["clip_cache"] = {
-                "key": cache_key,
-                "results": results,
-                "aspect_names": aspect_names,
-                "aspect_weights": aspect_weights,
-            }
-        except Exception:
-            pass
 
-    # Ensure cache exists immediately after auto-run (first enhance)
-    if not st.session_state.get("clip_cache"):
-        try:
-            st.session_state["clip_cache"] = {
-                "key": cache_key,
-                "results": results,
-                "aspect_names": aspect_names,
-                "aspect_weights": aspect_weights,
-            }
-        except Exception:
-            pass
+        st.success(f"✅ Found {len(results)} results")
 
-    # Apply search filters to CLIP results
-    results = apply_search_filters(results, exclude_series_list, exclude_videos_list)
+        # Rerank if enabled
+        if rerank_enabled:
+            st.markdown("---")
+            st.subheader("Reranking with Transcript")
 
-    # Add CLIP rank results to logs
-    def update_log():
-        with log_container.container():
-            st.text(gemini_log)
-            st.markdown(_aspects_header)
-            st.text(print_msg)
-            st.text(buf2.getvalue() if buf2 else "")
-    
-    update_log()
+            with st.spinner("📑 Reranking results..."):
+                w_clip = SessionStateManager.get('W_CLIP', 0.4)
+                w_text = SessionStateManager.get('W_TEXT', 0.6)
+                w_any = SessionStateManager.get('W_ANY', 0.3)
+                w_phr = SessionStateManager.get('W_PHR', 0.7)
 
-    # Row 7: Show CLIP results only when rerank is disabled
-    if not rerank_enabled:
-        # Cache results for interactive sorting without re-running (preserve existing key)
-        try:
-            _cc = dict(st.session_state.get("clip_cache", {}))
-            _cc.update({"results": results, "aspect_names": aspect_names})
-            st.session_state["clip_cache"] = _cc
-        except Exception:
-            pass
+                reranked_df, buf = rerank_with_transcript_ultra_window(
+                    results,
+                    query_vi,
+                    SEEDS,
+                    min(60, len(results)),
+                    DELTA_SEC,
+                    w_clip,
+                    w_text,
+                    {'any': w_any, 'phr': w_phr},
+                    verbose=True,
+                    sort_output=True,
+                    workers=8,
+                    phrases_only=False,
+                    max_unigrams=16,
+                    max_phrases=10,
+                    num_aspects=len(ASPECTS)
+                )
 
-        # Render Aspects Sort + Results (in the same container, sort UI above results)
-        with clip_results_container.container():
-            if results and aspect_names:
-                with st.expander("↔️ Adjust Aspects (Only works with basic CLIP mode)", expanded=False):
-                    # Sliders to adjust aspect weights (persistent during session)
-                    weight_key = st.session_state.get("clip_cache", {}).get("key", "default")
-                    if 'aspect_weight_overrides' not in st.session_state:
-                        st.session_state['aspect_weight_overrides'] = {}
-                    overrides_all = st.session_state['aspect_weight_overrides']
-                    overrides = overrides_all.get(weight_key, {})
+            if not reranked_df.empty:
+                st.success(f"✅ Reranked {len(reranked_df)} results")
 
-                    cols = st.columns(len(aspect_names)) if len(aspect_names) > 0 else [st]
-                    new_weights = []
-                    for idx, name in enumerate(aspect_names):
-                        default_w = float(aspect_weights[idx]) if idx < len(aspect_weights) else 1.0
-                        default_w = max(0.5, min(1.6, default_w))
-                        with cols[idx % len(cols)]:
-                            w = st.slider(
-                                label=name,
-                                min_value=0.5,
-                                max_value=1.6,
-                                value=float(overrides.get(idx, default_w)),
-                                step=0.05,
-                                key=f"aspect_weight_slider_{idx}"
-                            )
-                            new_weights.append(w)
-                    overrides_all[weight_key] = {i: new_weights[i] for i in range(len(new_weights))}
-                    st.caption("Kéo slider để tăng/giảm trọng số từng aspect (0.5 → 1.6). Sắp xếp theo tổng điểm có trọng số mới.")
+                # Reorder results
+                final_results = reorder_results_by_df(results, reranked_df, TOP_VIDEOS)
 
-                    # Re-rank view by weighted sum of aspect scores using sliders (no rescoring)
-                    def _weighted_sum(win, wts):
-                        scores = win.get("aspect_scores", [])
-                        s = 0.0
-                        for i, w in enumerate(wts):
-                            if i < len(scores):
-                                s += float(w) * float(scores[i])
-                        return s
-                    results = sorted(results, key=lambda r: _weighted_sum(r["win"], new_weights), reverse=True)
+                # Display reranked results
+                for i, r in enumerate(final_results[:TOP_VIDEOS]):
+                    vid = r['video_id']
+                    win = r.get('win', {})
+                    t0 = win.get('t0', r.get('timestamp', 0))
+                    t1 = win.get('t1', t0 + WINDOW_SEC)
 
-            st.subheader("CLIP Multi-Aspects Results")
-            if not results:
-                st.info("No results found (check feature directories and dataset selection).")
-            else:
-                rows = min(TOP_VIDEOS, len(results))
-                for i in range(rows):
-                    r = results[i]
-                    vid, win = r["video_id"], r["win"]
-                    t0s, t1s = sec_to_mmss(win['t0']), sec_to_mmss(win['t1'])
                     with st.container():
-                        st.markdown(f"**[{i+1}] {vid}** · total={r['total']:.3f} · win: {t0s} → {t1s}")
-                        cols = st.columns(len(aspect_names))
-                        for j, col in enumerate(cols):
-                            with col:
-                                frame = int(win["aspect_frames"][j])
-                                score = float(win["aspect_scores"][j])
-                                img = safe_imread(keyframe_path(vid, frame))
-                                st.image(img, caption="")
-                                st.markdown(f"**{aspect_names[j]}**")
-                                st.markdown(f"frame={frame} s={score:.3f}")
-                    url = get_watch_url(vid)
-                    with st.popover("🎥 Watch Video", width='stretch'):
-                        st.markdown(create_popover_css(), unsafe_allow_html=True)
-                        col1, col2 = st.columns([2, 1]) # Căn lề radio qua phải
-                        with col1:
-                            st.markdown("")  # Cột trống để đẩy sang phải
-                        with col2:
-                            # Danh sách các lựa chọn (giữ logic đơn giản)
-                            options = ("Youtube Online", "Kaggle Offline")
-                            
-                            # Hàm để định dạng cách hiển thị (thêm icon)
-                            def format_func(option):
-                                if option == "Youtube Online":
-                                    return f"▶️ {option}"
-                                elif option == "Kaggle Offline":
-                                    return f"☁️ {option}"
-                                return option
+                        st.markdown(f"**[{i+1}] {vid}** · score: {r.get('total', 0):.3f} · window: {sec_to_mmss(t0)} → {sec_to_mmss(t1)}")
 
-                            watch_mode = st.radio(
-                                "Watch Mode Select",
-                                options,
-                                key=f"watch_mode_clip_{vid}",
-                                horizontal=True,
-                                label_visibility="collapsed",
-                                format_func=format_func
-                            )
+                        # Show keyframe
+                        frame_num = timestamp_to_keyframe_number(vid, t0)
+                        best_frame, kf_path = find_best_keyframe(vid, frame_num)
 
-                        start_sec = int(max(0, win['t0']))
-                        actual_video_id = vid
-                        actual_fps = get_fps_from_csv(actual_video_id)
-                        
-                        if watch_mode == "Youtube Online":
-                            url = get_watch_url(vid)
-                            if url:
-                                youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
-                                components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
-                            else:
-                                st.warning("YouTube URL not found for this video. Try Kaggle Offline mode.")
-                        
-                        elif watch_mode == "Kaggle Offline":
-                            # Create placeholders for the progress UI
-                            status_placeholder = st.empty()
-                            
-                            local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
-                            
-                            if local_path:
-                                file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
-                                components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
-                        else:
-                            # Error message is already shown by the download function
-                            pass
-                    st.divider()
-        # Ensure rerank section is empty when disabled
-        rerank_results_container.empty()
-        
-        # Stop here - don't continue with CLIP execution
-        st.stop()
-
-    # 2) Transcript rerank (only if enabled)
-    if rerank_enabled:
-        if debug_mode:
-            st.write(f"🔍 Debug - Starting rerank, Results: {len(results) if results else 0}, SEEDS: {bool(SEEDS)}")
-        
-        # Get CLIP results from cache if not available
-        if not results or len(results) == 0:
-            if st.session_state.get("clip_cache"):
-                cached_clip_data = st.session_state["clip_cache"]
-                results = cached_clip_data.get("results", [])
-                if debug_mode:
-                    st.write(f"🔍 Debug - Using cached CLIP results: {len(results)} results")
+                        if os.path.exists(kf_path):
+                            img = safe_imread(kf_path)
+                            if img:
+                                st.image(img, caption=f"{vid} @ {sec_to_mmss(t0)}", use_container_width=True)
             else:
-                st.error("No CLIP results available for reranking. Please run CLIP search first.")
-                st.stop()
-        
-        # Get SEEDS from enhanced_data if not available
-        if not SEEDS or (not SEEDS.get("unigrams") and not SEEDS.get("phrases")):
-            if st.session_state.get("enhanced_data"):
-                SEEDS = st.session_state["enhanced_data"].get("seeds", {})
-                if debug_mode:
-                    st.write(f"🔍 Debug - Using cached SEEDS: {len(SEEDS.get('unigrams', []))} unigrams, {len(SEEDS.get('phrases', []))} phrases")
-            else:
-                st.error("No seeds available for reranking. Please enhance query with Gemini first.")
-                st.stop()
-        
-        # Auto-rerank logic will be handled in the main execution flow
-        # No need for separate Run Rerank button
-        
-        # Do not render initial CLIP grid; proceed directly to reranked results
-        clip_results_container.empty()
-        # Add rerank start message to logs
-        def update_log():
-            with log_container.container():
-                st.text(gemini_log)
-                st.markdown(_aspects_header)
-                st.text(print_msg)
-                st.text(buf2.getvalue() if buf2 else "")
-                st.text("Running rerank_with_transcript_ultra_window() ...")
-        
-        update_log()
-        
-        # Build cache key for Rerank results
-        try:
-            rerank_cache_key = json.dumps({
-                "results": results,
-                "query": query_vi,
-                "seeds": SEEDS,
-                "top_candidates": 60,
-                "delta_sec": DELTA_SEC,
-                "w_clip": st.session_state.get('W_CLIP', 0.4),
-                "w_text": st.session_state.get('W_TEXT', 0.6),
-                "text_weights": {"any": st.session_state.get('W_ANY', 0.3), "phr": st.session_state.get('W_PHR', 0.7)},
-                "workers": 8,
-                "phrases_only": False,
-                "max_unigrams": 16,
-                "max_phrases": 10,
-                "num_aspects": len(ASPECTS)
-            }, ensure_ascii=False, sort_keys=True)
-        except Exception:
-            rerank_cache_key = None
+                st.warning("Reranking produced no results.")
 
-        # Check cache
-        rerank_cache_hit = bool(st.session_state.get("rerank_cache") and st.session_state["rerank_cache"].get("key") == rerank_cache_key)
-        
-        if debug_mode:
-            st.write(f"🔍 Debug - Rerank cache: {rerank_cache_hit}")
-        
-        if rerank_cache_hit:
-            if debug_mode:
-                st.write(f"🔍 Debug - Using cached Rerank results")
-                cached_data = st.session_state["rerank_cache"]["results"]
-                st.write(f"🔍 Debug - Cached data type: {type(cached_data)}")
-                if hasattr(cached_data, 'shape'):
-                    st.write(f"🔍 Debug - Cached data shape: {cached_data.shape}")
-                elif hasattr(cached_data, '__len__'):
-                    st.write(f"🔍 Debug - Cached data length: {len(cached_data)}")
-            reranked_df = st.session_state["rerank_cache"]["results"]
-            buf3 = st.session_state["rerank_cache"].get("buf", io.StringIO())
-            
-            # Validate cached data - more comprehensive check
-            is_valid_cache = (
-                reranked_df is not None and 
-                not isinstance(reranked_df, tuple) and 
-                hasattr(reranked_df, 'shape') and 
-                len(reranked_df.shape) == 2 and 
-                reranked_df.shape[0] > 0 and 
-                reranked_df.shape[1] > 0
-            )
-            
-            if not is_valid_cache:
-                if debug_mode:
-                    st.write(f"🔍 Debug - Cached data invalid, clearing cache and running fresh")
-                    st.write(f"🔍 Debug - Validation: None={reranked_df is None}, Tuple={isinstance(reranked_df, tuple)}, Shape={getattr(reranked_df, 'shape', 'No shape')}")
-                # Clear invalid cache
-                st.session_state.pop("rerank_cache", None)
-                # Run fresh rerank
-                with st.spinner("📑 Đang rerank theo transcript..."):
-                    try:
-                        if debug_mode:
-                            st.write(f"🔍 Debug - Running fresh rerank after cache validation failed")
-                        (reranked_df, buf3) = run_with_logs(
-                            rerank_with_transcript_ultra_window,
-                            results, query_vi, SEEDS,
-                            60, DELTA_SEC,
-                            st.session_state.get('W_CLIP', 0.4), st.session_state.get('W_TEXT', 0.6),
-                            {"any": st.session_state.get('W_ANY', 0.5), "phr": st.session_state.get('W_PHR', 0.5)}, True, True,
-                            workers=8, phrases_only=False, max_unigrams=16, max_phrases=10,
-                            num_aspects=len(ASPECTS)
-                        )
-                        
-                        # Validate result before saving cache
-                        if reranked_df is None or not hasattr(reranked_df, 'shape') or reranked_df.shape[0] == 0:
-                            if debug_mode:
-                                st.write(f"🔍 Debug - Fresh rerank result invalid: {type(reranked_df)}, shape: {getattr(reranked_df, 'shape', 'No shape')}")
-                            st.error("Fresh rerank failed - no valid results returned")
-                            st.stop()
-                        
-                        # Save cache only if result is valid
-                        try:
-                            st.session_state["rerank_cache"] = {
-                                "key": rerank_cache_key,
-                                "results": reranked_df,
-                                "buf": buf3
-                            }
-                            if debug_mode:
-                                st.write(f"🔍 Debug - Fresh rerank cache saved successfully, shape: {reranked_df.shape}")
-                        except Exception as e:
-                            if debug_mode:
-                                st.write(f"🔍 Debug - Fresh rerank cache save failed: {e}")
-                            
-                    except Exception as e:
-                        st.error(f"Rerank failed with error: {str(e)}")
-                        st.info("This might be due to missing transcript data or invalid seeds. Try running CLIP search without rerank first.")
-                        if debug_mode:
-                            st.write(f"🔍 Debug - Exception details: {type(e).__name__}: {str(e)}")
-                            import traceback
-                            st.code(traceback.format_exc())
-                        st.stop()
         else:
-            if debug_mode:
-                st.write(f"🔍 Debug - Running fresh rerank")
-                st.write(f"🔍 Debug - Results type: {type(results)}, length: {len(results) if results else 'None'}")
-                st.write(f"🔍 Debug - SEEDS: {SEEDS}")
-                st.write(f"🔍 Debug - Query: {query_vi}")
-            with st.spinner("📑 Đang rerank theo transcript..."):
-                try:
-                    if debug_mode:
-                        st.write(f"🔍 Debug - Calling rerank_with_transcript_ultra_window...")
-                        # Check if required functions exist
-                        st.write(f"🔍 Debug - build_keyword_sets exists: {callable(build_keyword_sets)}")
-                        st.write(f"🔍 Debug - _alias_windows_and_dbpaths exists: {callable(_alias_windows_and_dbpaths)}")
-                        st.write(f"🔍 Debug - _count_one exists: {callable(_count_one)}")
-                        # Check database paths
-                        st.write(f"🔍 Debug - B1_DB_PATH exists: {os.path.exists(B1_DB_PATH) if 'B1_DB_PATH' in globals() else 'Not defined'}")
-                        st.write(f"🔍 Debug - B2_DB_PATH exists: {os.path.exists(B2_DB_PATH) if 'B2_DB_PATH' in globals() else 'Not defined'}")
-                    (reranked_df, buf3) = run_with_logs(
-                        rerank_with_transcript_ultra_window,
-                        results, query_vi, SEEDS,
-                        60, DELTA_SEC,
-                        st.session_state.get('W_CLIP', 0.4), st.session_state.get('W_TEXT', 0.6),
-                        {"any": st.session_state.get('W_ANY', 0.5), "phr": st.session_state.get('W_PHR', 0.5)}, True, True,
-                        workers=8, phrases_only=False, max_unigrams=16, max_phrases=10,
-                        num_aspects=len(ASPECTS)
-                    )
-                    
-                    if debug_mode:
-                        st.write(f"🔍 Debug - Rerank completed, result type: {type(reranked_df)}")
-                        if hasattr(reranked_df, 'shape'):
-                            st.write(f"🔍 Debug - Result shape: {reranked_df.shape}")
-                    
-                    # Validate result before saving cache
-                    if reranked_df is None or not hasattr(reranked_df, 'shape') or reranked_df.shape[0] == 0:
-                        if debug_mode:
-                            st.write(f"🔍 Debug - Fresh rerank result invalid: {type(reranked_df)}, shape: {getattr(reranked_df, 'shape', 'No shape')}")
-                        st.error("Fresh rerank failed - no valid results returned")
-                        st.stop()
-                    
-                    # Save cache only if result is valid
-                    try:
-                        st.session_state["rerank_cache"] = {
-                            "key": rerank_cache_key,
-                            "results": reranked_df,
-                            "buf": buf3
-                        }
-                        if debug_mode:
-                            st.write(f"🔍 Debug - Cache saved successfully, shape: {reranked_df.shape}")
-                    except Exception as e:
-                        if debug_mode:
-                            st.write(f"🔍 Debug - Cache save failed: {e}")
-                        
-                except Exception as e:
-                    st.error(f"Rerank failed with error: {str(e)}")
-                    st.info("This might be due to missing transcript data or invalid seeds. Try running CLIP search without rerank first.")
-                    if debug_mode:
-                        st.write(f"🔍 Debug - Exception details: {type(e).__name__}: {str(e)}")
-                        import traceback
-                        st.code(traceback.format_exc())
-                    st.stop()
-        
-        if reranked_df is None or isinstance(reranked_df, tuple):
-            st.error("Rerank failed. See logs.")
-            st.stop()
-        # Add final rerank results to logs
-        def update_log():
-            with log_container.container():
-                st.text(gemini_log)
-                st.markdown(_aspects_header)
-                st.text(print_msg)
-                st.text(buf2.getvalue() if buf2 else "")
-                st.text("Running rerank_with_transcript_ultra_window() ...")
-                st.text(buf3.getvalue() if buf3 else "")
-        
-        update_log()
-        # Show a pretty table for the rerank head inside the Logs expander
-        with log_exp:
-            try:
-                _tbl = reranked_df.head(10).copy()
-                _tbl["t0"] = [sec_to_mmss(t) for t in _tbl["t0"].values]
-                _tbl["t1"] = [sec_to_mmss(t) for t in _tbl["t1"].values]
-                _show_cols = ["video_id","clip_total","hits_any","hits_phr","clip_n","text_score","fused","t0","t1"]
-                st.dataframe(_tbl[_show_cols].reset_index(drop=True), width='stretch')
-            except Exception:
-                pass
+            # Display CLIP results without reranking
+            st.subheader("CLIP Search Results")
 
-        top_after = reorder_results_by_df(results, reranked_df, top_videos=TOP_VIDEOS)
+            for i, r in enumerate(results[:TOP_VIDEOS]):
+                vid = r['video_id']
+                timestamp = r.get('timestamp', 0)
+                score = r.get('score', 0)
 
-        # Row 8: Show reranked results
-        with rerank_results_container.container():
-            st.subheader("CLIP Multi-Aspects + Rerank with Transcript")
-            if reranked_df.empty:
-                st.info("No candidates for rerank.")
+                with st.container():
+                    st.markdown(f"**[{i+1}] {vid}** · score: {score:.3f} · time: {sec_to_mmss(timestamp)}")
+
+                    # Show keyframe
+                    frame_num = timestamp_to_keyframe_number(vid, timestamp)
+                    best_frame, kf_path = find_best_keyframe(vid, frame_num)
+
+                    if os.path.exists(kf_path):
+                        img = safe_imread(kf_path)
+                        if img:
+                            st.image(img, caption=f"{vid} @ {sec_to_mmss(timestamp)}", use_container_width=True)
+
+# Transcript Seed Search (BM25)
+elif bm25_seed_enabled:
+    if gemini_available:
+        if not SessionStateManager.get('query_enhanced', False):
+            enhance_button = st.button("🌱 Enhance Query", type="primary", width='stretch')
+            if enhance_button:
+                _clear_run_flags()
+                if not query_vi.strip():
+                    st.error("Please enter a query first!")
+                else:
+                    with st.spinner("Enhancing query with Gemini..."):
+                        try:
+                            enhanced_data = extract_aspects_and_seeds_with_gemini(
+                                query_vi,
+                                gemini_temperature,
+                                gemini_top_p,
+                                gemini_model,
+                                max_aspects_input.strip() if max_aspects_input.strip() else "N"
+                            )
+                            SessionStateManager.set('enhanced_data', enhanced_data)
+                            SessionStateManager.set('query_enhanced', True)
+                            SessionStateManager.set('auto_run_after_enhance', True)
+                            st.success("✅ Query enhanced successfully!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Enhancement failed: {e}")
+        else:
+            # Show Run/Reset buttons
+            col1, col2 = st.columns(2)
+            with col1:
+                run_button = st.button("🚀 Run Search", type="primary", use_container_width=True)
+                if run_button:
+                    reset_watch_mode_keys()
+                    _set_run_flag("bm25_seed", True)
+
+            with col2:
+                reset_button = st.button("🔄 Reset", use_container_width=True)
+                if reset_button:
+                    SessionStateManager.set('query_enhanced', False)
+                    SessionStateManager.set('enhanced_data', None)
+                    _clear_run_flags()
+                    st.rerun()
+    else:
+        # No Gemini - use manual seed input
+        st.warning("⚠️ Gemini not available. Enter seeds manually or enable Gemini.")
+
+        seeds_unigrams = st.text_input("Unigrams (comma-separated):", placeholder="cát, điêu, khắc")
+        seeds_phrases = st.text_input("Phrases (comma-separated):", placeholder="điêu khắc cát, nghệ thuật")
+
+        run_button = st.button("🚀 Run Search", type="primary", width='stretch')
+        if run_button:
+            reset_watch_mode_keys()
+
+            # Build seeds from manual input
+            unigrams = [s.strip() for s in seeds_unigrams.split(',') if s.strip()]
+            phrases = [s.strip() for s in seeds_phrases.split(',') if s.strip()]
+
+            if not unigrams and not phrases:
+                st.error("Please enter at least some keywords!")
             else:
-                rows = min(TOP_VIDEOS, len(top_after))
-                for i in range(rows):
-                    r = top_after[i]
-                    vid, win = r["video_id"], r["win"]
-                    t0s, t1s = sec_to_mmss(win['t0']), sec_to_mmss(win['t1'])
-                    with st.container():
-                        st.markdown(f"**[{i+1}] {vid}** · total={r['total']:.3f} · win: {t0s} → {t1s}")
-                        cols = st.columns(len(aspect_names))
-                        for j, col in enumerate(cols):
-                            with col:
-                                frame = int(win["aspect_frames"][j])
-                                score = float(win["aspect_scores"][j])
-                                img = safe_imread(keyframe_path(vid, frame))
-                                st.image(img, caption="")
-                                st.markdown(f"**{aspect_names[j]}**")
-                                st.markdown(f"frame={frame} s={score:.3f}")
-                    url = get_watch_url(vid)
-                    if url:
-                        # Watch Video button with popover
-                        with st.popover("🎥 Watch Video", width='stretch'):
-                            st.markdown(create_popover_css(), unsafe_allow_html=True)
-                            col1, col2 = st.columns([2, 1]) # Căn lề radio qua phải
-                            with col1:
-                                st.markdown("")  # Cột trống để đẩy sang phải
-                            with col2:
-                                # Danh sách các lựa chọn (giữ logic đơn giản)
-                                options = ("Youtube Online", "Kaggle Offline")
-                                
-                                # Hàm để định dạng cách hiển thị (thêm icon)
-                                def format_func(option):
-                                    if option == "Youtube Online":
-                                        return f"▶️ {option}"
-                                    elif option == "Kaggle Offline":
-                                        return f"☁️ {option}"
-                                    return option
+                enhanced_data = {
+                    'seeds': {
+                        'unigrams': unigrams,
+                        'phrases': phrases
+                    }
+                }
+                SessionStateManager.set('enhanced_data', enhanced_data)
+                _set_run_flag("bm25_seed", True)
 
-                                watch_mode = st.radio(
-                                    "Watch Mode Select",
-                                    options,
-                                    key=f"watch_mode_clip2_{vid}",
-                                    horizontal=True,
-                                    label_visibility="collapsed",
-                                    format_func=format_func
-                                )
-                            # Use the actual video ID from dataset (not from YouTube URL)
-                            start_sec = int(max(0, win['t0']))
-                            actual_video_id = vid  # Use the dataset video ID (e.g., K16_V013)
-                            actual_fps = get_fps_from_csv(actual_video_id)
-                            
-                            if watch_mode == "Youtube Online":
-                                if url:
-                                    youtube_video_id = url.split('v=')[1].split('&')[0] if 'v=' in url else url.split('/')[-1]
-                                    # Use the working YouTube API with FPS-based frame calculation
-                                    components.html(create_youtube_player_html(youtube_video_id, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500)
-                                else:
-                                    st.warning("YouTube URL not found for this video. Try Kaggle Offline mode.")
-                            
-                            elif watch_mode == "Kaggle Offline":
-                                # Chỉ cần một placeholder duy nhất cho spinner và các thông báo
-                                status_placeholder = st.empty()
-                                
-                                local_path = download_video_from_kaggle(actual_video_id, LOCAL_VIDEO_ROOT, status_placeholder)
-                                
-                                if local_path:
-                                    file_url = f"{LOCAL_VIDEO_URL_BASE}/{local_path.name}"
-                                    components.html(create_local_player_html(file_url, start_sec, fps=actual_fps, video_name=actual_video_id), height=1500, scrolling=True)
-                                else:
-                                    # Error message is already shown by the download function
-                                    pass
-                    else:
-                        st.markdown("No video URL available")
-                    st.divider()
+    # Execute search if run flag is set
+    if _get_run_flag("bm25_seed"):
+        st.markdown("---")
+
+        enhanced_data = SessionStateManager.get('enhanced_data')
+        if not enhanced_data:
+            st.error("No enhanced data available.")
+            st.stop()
+
+        SEEDS = enhanced_data.get('seeds', {})
+
+        # Display seeds
+        st.subheader("Search Seeds")
+        with st.expander("**Keywords**", expanded=True):
+            st.write("**Unigrams:**", ", ".join(SEEDS.get('unigrams', [])))
+            st.write("**Phrases:**", ", ".join(SEEDS.get('phrases', [])))
+
+        # Build BM25 query
+        bm25_query = build_bm25_query_from_seeds(query_vi, SEEDS)
+
+        if not bm25_query:
+            st.error("No valid keywords to search.")
+            st.stop()
+
+        with st.spinner("🔍 Searching transcripts with seeds..."):
+            results = bm25_search_videos(bm25_query, limit=50)
+
+        if results:
+            st.success(f"✅ Found {len(results)} results")
+
+            # Deduplicate results
+            results = deduplicate_bm25_results(results, time_threshold=30.0)
+
+            # Show results
+            for i, result in enumerate(results[:TOP_VIDEOS]):
+                vid = result['video_id']
+                timestamp = result['timestamp']
+                score = result['score']
+                highlighted_text = result.get('highlighted_full_text', result.get('full_text', ''))
+
+                with st.container():
+                    st.markdown(f"**[{i+1}] {vid}** · time: {sec_to_mmss(timestamp)} · score: {score:.3f}")
+
+                    # Show highlighted transcript
+                    if highlighted_text:
+                        st.markdown(f'<div class="bm25-fulltext">{highlighted_text}</div>', unsafe_allow_html=True)
+
+                    # Show keyframe
+                    frame_num = timestamp_to_keyframe_number(vid, timestamp)
+                    best_frame, kf_path = find_best_keyframe(vid, frame_num)
+
+                    if os.path.exists(kf_path):
+                        img = safe_imread(kf_path)
+                        if img:
+                            st.image(img, caption=f"{vid} - Frame {best_frame} @ {sec_to_mmss(timestamp)}", use_container_width=True)
+        else:
+            st.warning("No results found. Try different keywords.")
+
+# ============================ VIDEO SERVER ============================
+
+# Start local video server if needed
+LOCAL_VIDEO_ROOT = settings.LOCAL_VIDEO_ROOT
+LOCAL_VIDEO_URL_BASE = settings.LOCAL_VIDEO_URL_BASE
+
+# Ensure video root exists
+LOCAL_VIDEO_ROOT.mkdir(exist_ok=True)
+
+# Start Flask server
+video_app = make_video_app(str(LOCAL_VIDEO_ROOT))
+ensure_server_once(video_app, settings.FLASK_HOST, settings.FLASK_PORT)
+
+# ============================ FOOTER ============================
+
+st.markdown("---")
+st.markdown("**Multimodal Video Retrieval System** · Powered by CLIP + BM25 + Gemini")
