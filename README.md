@@ -3,6 +3,12 @@
 A comprehensive video retrieval and annotation application for the AIC25 video dataset.  
 Combines **multi-aspect CLIP window search** with **BM25 transcript/OCR**, **Gemini query enhancement**, and **interactive video annotation system**.
 
+### Current and legacy entry points
+
+- [`app.py`](app.py) is the modular search app, using the `services/`, `utils/`, and `components/` packages.
+- [`app_original_backup.py`](app_original_backup.py) is the earlier monolithic app. It still contains the custom YouTube/local players with KIS, QA, and TRAKE annotation controls and CSV export, plus `transcript_seed_bm25_search`. These implementations are absent from the modular app.
+- The player/annotation features described below refer to that legacy implementation. The modular app does not import the legacy file. Keep it until those features have been ported and verified; it is not a redundant backup.
+
 ---
 
 ## ✨ Application Features
