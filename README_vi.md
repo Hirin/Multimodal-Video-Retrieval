@@ -3,6 +3,12 @@
 Ứng dụng truy xuất và chú thích video toàn diện cho bộ dữ liệu video AIC25.  
 Kết hợp **tìm kiếm cửa sổ đa khía cạnh CLIP** với **BM25 transcript/OCR**, **bộ mở rộng truy vấn Gemini**, và **hệ thống chú thích video tương tác**.
 
+### Phiên bản hiện tại và phiên bản cũ
+
+- [`app.py`](app.py) là ứng dụng tìm kiếm đã tách thành các package `services/`, `utils/` và `components/`.
+- [`app_original_backup.py`](app_original_backup.py) là phiên bản nguyên khối trước đó. File này vẫn chứa trình phát YouTube/local với thao tác chú thích KIS, QA, TRAKE và xuất CSV, cùng hàm `transcript_seed_bm25_search`. Các phần triển khai này chưa có trong ứng dụng đã tách module.
+- Các tính năng trình phát/chú thích mô tả bên dưới thuộc phiên bản cũ. Ứng dụng module không import file này. Cần giữ lại cho đến khi các tính năng được chuyển sang và kiểm chứng; đây không phải bản sao dư thừa.
+
 ---
 
 ## ✨ Chức năng của ứng dụng
